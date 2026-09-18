@@ -424,3 +424,89 @@ at-daemon 的默认 end_flag 列表 = `OK` / `ERROR` / `+CME ERROR:` / `+CME ERR
 
 ⇒ 「fm160d 是 AT 口唯一属主」这个设计前提，在**这台机器上并不成立**。
 动手前先确认没有别的进程会去开 `ttyUSB2`（`grep ttyUSB /proc/*/fd`）。
+
+**已处置（2026-09-18，用户选的「最小改动」方案）**：
+`/etc/init.d/modemmanager disable && /etc/init.d/modemmanager stop` ⇒
+rc.d 链接已撤、`ModemManager`/`-wrapper`/两个 `-monitor` 全部退出、服务状态 `DISABLED`。
+处置后实测：`ttyUSB0/1/3` **无任何持有者**，`ttyUSB2` 仅 `ubus-at-daemon` 持有，
+`fm160d` PID 不变、`worst_response_ms` 仍为 40 ⇒ 处理是安全且有效的。
+⚠️ 停之前它虽然**没抢到** AT 口（`ubus-at-daemon` 先开了），但 USB 一旦重枚举它就会去探所有 ttyUSB。
+
+**按用户决定暂留**：`adb-enablemodem`（对 FM160 永不匹配，白占 adb server）与
+`network.2_1`/`2_1v6`（`wwan0` 上的 dhcp/dhcpv6，M2 拨号阶段会一并处理）。
+
+### 8.5 ★★ `sendat` 的 `timeout` 单位是**秒**，不是毫秒 —— 传错 = 整个 daemon 失联
+
+三条独立证据都指向「秒」：
+
+* `at-daemon/src/const.h`：`#define DEFAULT_TIMEOUT 5   // seconds`
+* QModem 的参考客户端：`ubus_invoke(..., timeout * 1000 + 1000)` —— 即它对外按**秒**记账，
+  只有 `ubus_invoke` 的预算才乘 1000 换成毫秒。
+* 我们自己的 `fm160d`：
+  `fm160d.h` 写着 `int timeout_ms;  /* sendat timeout, seconds internally */`，
+  `atq.c` 做 `secs = (req->timeout_ms + 999) / 1000;` 再上线，
+  而 `ubus_invoke()` 的客户端预算用 `req->timeout_ms + 2000`（**这里**才是毫秒）。
+  ⇒ LuCI（`debug.js` 传 5000/20000 ms）→ `fm160d` → `at-daemon` 这条链**是对的**。
+
+**传错的后果不是「早一点超时」，而是整个 daemon 失联：**
+
+* `at_handler.c` 的等待是 `abs_timeout.tv_sec += timeout;` + `pthread_cond_timedwait()`，
+  单位是**秒**。所以 `"timeout":2000`（本想 2 s）⇒ daemon 原地等 **2000 秒（33 分钟）**。
+* 更致命的是 `ubus_sendat_method` 是**在 ubus 主循环里同步执行**的：
+  这一条请求卡住时，`list` / `close` / `open` … **所有**方法都不再应答。
+* 实测（2026-09-18 21:00）：一条 `timeout:2000` 的探针打出去之后 ——
+  * `ubus call at-daemon list` 30 s 无响应，客户端报 `Request timed out`；
+  * `fm160d` 每 4 s 打一条 `sendat invoke failed: Request timed out`，
+    状态掉到 `port_found=false`、`port=""`、`consec_timeout=3`、`last_ok_age_ms` 一路涨到 198634；
+  * `procd` 收到 SIGTERM 后**杀不掉它**（阻塞在 `pthread_cond_timedwait` 里没看信号），
+    最后是 `not stopped on SIGTERM, sending SIGKILL instead`。
+
+**为什么这个坑一直藏着**：此前所有探针命令都在 14–30 ms 内命中 `OK` 终结符，
+`timeout` 路径**一次都没被走到**。只有「模块根本不回答」时才会炸。
+
+⇒ **纪律**：任何直接调 `at-daemon sendat` 的脚本/工具，`timeout` 一律按**秒**写（`2`、`6`）；
+传 `2000`/`6000` 这种数就是 33 分钟 / 100 分钟的失联。
+`_probe/` 下的 `04`–`07` 原来写的正是 `T=6000` / `t=${3:-6000}`，已全部改成秒并加了警告头。
+
+### 8.6 四个接口的应答性（逐口探完，2026-09-18）
+
+同一时刻的映射（`realpath /sys/class/tty/ttyUSBn/device` ⇒ `.../2-1:1.n/ttyUSBn`）：
+
+| 端口 | USB 接口 | 驱动 | 应答 AT？ | 实测证据 |
+|---|---|---|---|---|
+| `/dev/ttyUSB0` | `2-1:1.0`（DIAG） | `option1` | **否，完全静默** | 4 条全 `status:timeout`、`response_time_ms:2000`，且**没有** `partial_response` |
+| `/dev/ttyUSB1` | `2-1:1.1`（官方称 NMEA） | `option1` | **是** | `AT`→`\r\nOK\r\n` 20 ms；`ATI` 整段身份 142 B / 22 ms；`AT+CGMM`→`FM160-CN` 14 ms |
+| `/dev/ttyUSB2` | `2-1:1.2`（AT） | `option1` | **是** | 14–29 ms，`fm160d` 的正式 AT 口 |
+| `/dev/ttyUSB3` | `2-1:1.3`（MODEM） | `option1` | **否，只回显** | 全 `status:timeout`；`partial_response` **就是我们自己发出去的** `AT\r\n\r\n` |
+
+★★ **「iface 1 = NMEA、iface 2 = AT、iface 3 = MODEM」这个官方端口描述在本机不成立**：
+
+* **iface 1 是一个能用的 AT 口**，而且**不吐 NMEA** —— 用永不匹配的终结符做 2 秒原始抓取，
+  只收到 `\r\nOK\r\n`，没有 `$GPxxx`/`$GNxxx` 之类的语句流。
+* **iface 3 反而是半个死口**：有回显、没有 AT 解释器（`partial_response` 恰好等于发出去的命令）。
+* ⇒ 本机实际可用 AT 口**有两个**（iface 1 与 iface 2）。这不是坏事：iface 1 是天然的**备份 AT 口**。
+
+定位接口号的方法（别只看第一层）：`bInterfaceNumber` 在 `/sys/class/tty/ttyUSBn/device`
+**上一层的 interface 目录**里，且格式是 **`%02x`**（`00/01/02/03`）；
+`idVendor` 还要再往上到 usb_device 节点才有。
+
+### 8.7 `fm160d` 的探测序（实测）与一个待改的排序
+
+实测启动日志：
+
+```
+AT candidates: 4 Fibocom (2cb7:*), 0 unclassified, 0 foreign
+  | probe order: /dev/ttyUSB2(if2) /dev/ttyUSB3(if3) /dev/ttyUSB1(if1) /dev/ttyUSB0(if0)
+AT port is /dev/ttyUSB2          <- 启动后 1 秒内命中首个候选
+```
+
+* 正常路径**不会**走到 if3/if0，因为它们排在第 3/4 位，而 if2 一击即中。
+* 但 if3 与 if0 **永不响应**，每走到一个就要付一次完整超时（`fm160d` 的 `timeout_ms` 下限 1 s）。
+  ⇒ if2 一旦短暂失败，就会先白付 1 s 在死口 if3 上，才轮到**真正可用的 if1**。
+* **建议（尚未实施）**：候选序改为 `if2 → if1 → if3 → if0`，
+  并把**完全静默的 iface 0 直接从候选里剔除**。
+* 判据补充：`partial_response` 只在 `status: timeout` 时出现，
+  正好用来区分「完全静默」（if0）与「有回显、无解析」（if3）。
+
+复现脚本：`_probe/10-at-facts.sh`（已用正确单位；**故意跳过 ttyUSB2**，
+因为那是 `fm160d` 正在轮询的口）。`_probe/09-tty-truth.sh` 只做只读取证，不发任何 AT。
