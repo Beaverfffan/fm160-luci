@@ -490,7 +490,7 @@ rc.d 链接已撤、`ModemManager`/`-wrapper`/两个 `-monitor` 全部退出、�
 **上一层的 interface 目录**里，且格式是 **`%02x`**（`00/01/02/03`）；
 `idVendor` 还要再往上到 usb_device 节点才有。
 
-### 8.7 `fm160d` 的探测序（实测）与一个待改的排序
+### 8.7 `fm160d` 的探测序（实测 ⇒ 已修正并部署）
 
 实测启动日志：
 
@@ -503,10 +503,30 @@ AT port is /dev/ttyUSB2          <- 启动后 1 秒内命中首个候选
 * 正常路径**不会**走到 if3/if0，因为它们排在第 3/4 位，而 if2 一击即中。
 * 但 if3 与 if0 **永不响应**，每走到一个就要付一次完整超时（`fm160d` 的 `timeout_ms` 下限 1 s）。
   ⇒ if2 一旦短暂失败，就会先白付 1 s 在死口 if3 上，才轮到**真正可用的 if1**。
-* **建议（尚未实施）**：候选序改为 `if2 → if1 → if3 → if0`，
-  并把**完全静默的 iface 0 直接从候选里剔除**。
+* **已实施（2026-09-18）**：候选序改为 **`if2 → if1 → if3`**，
+  iface 1 提升到第二位；**完全静默的 iface 0 被扣留**（`CAND_SILENT`），
+  只有在「别的候选一个都没有」时才作为最后手段使用 —— 保留这条兜底是因为
+  丢掉真正的 AT 口会让 daemon 根本起不来，比多花一次超时严重得多，
+  而且未来的 USB 模式有可能把 AT 挪回 iface 0。
+* 实测新日志（重编部署后）：
+  ```
+  AT candidates: 4 Fibocom (2cb7:*), 0 unclassified, 0 foreign, 1 held back as silent
+    | probe order: /dev/ttyUSB2(if2) /dev/ttyUSB1(if1) /dev/ttyUSB3(if3)
+  AT port is /dev/ttyUSB2          <- 启动后 1 秒内
+  ```
+  `if0` 不再出现在探测序里，`1 held back as silent` 明确报出扣留了一个。
 * 判据补充：`partial_response` 只在 `status: timeout` 时出现，
   正好用来区分「完全静默」（if0）与「有回显、无解析」（if3）。
+
+### 8.8 一个容易误判的点：只改 `files/` 时构建指纹看不出变化
+
+`06-rebuild-packages.sh` 的指纹是 `*.c`/`*.h` 的内容 md5。改 `files/` 下的脚本
+（例如 `files/etc/uci-defaults/99-fm160`）时，**指纹不会变**，脚本仍报
+`build <same> -> <same>`；但 `Build/Prepare` 的文件依赖**包含 `./files`**，
+所以编译确实会跑、新内容也确实进了 `.ipk`。
+⇒ 判据要成对看：**指纹管 `.c/.h` 是否重编，`.ipk` 的 sha256 管打包内容是否变**。
+本次两轮就是活例子：候选序那次**载荷二进制**从 `4778c4d9…` 变成 `6053977f…`（仍是 66377 B，
+**字节数不变、只有内容变**）；而 99-fm160 那次**载荷二进制没变**、只有 `.ipk` 的 sha 变了。
 
 复现脚本：`_probe/10-at-facts.sh`（已用正确单位；**故意跳过 ttyUSB2**，
 因为那是 `fm160d` 正在轮询的口）。`_probe/09-tty-truth.sh` 只做只读取证，不发任何 AT。

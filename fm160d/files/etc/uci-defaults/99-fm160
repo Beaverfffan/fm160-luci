@@ -7,10 +7,22 @@
 
 [ -f /etc/config/fm160 ] || exit 0
 
-# Warn (once) if ModemManager is installed - it opens every ttyUSB it finds and
-# will interleave with our transactions.
-if [ -x /usr/sbin/ModemManager ] || [ -x /usr/bin/ModemManager ]; then
-	logger -t fm160d "WARNING: ModemManager is installed; it will compete for the FM160 AT port. Disable it or remove it."
+# ModemManager opens every ttyUSB it finds and will interleave with our
+# transactions, so fm160d wants to be the single owner of the AT port.
+#
+# The question to ask is "will it actually start", not "is the binary on disk".
+# The first version tested the binary, which kept shouting "Disable it or remove
+# it" on a board where ModemManager had already been disabled -- and a warning
+# that is wrong is worse than no warning at all, because it is how you learn to
+# ignore the real one.
+if [ -x /etc/init.d/modemmanager ]; then
+	if /etc/init.d/modemmanager enabled; then
+		logger -t fm160d "WARNING: ModemManager is enabled; it will compete for the FM160 AT port. Run: /etc/init.d/modemmanager disable && /etc/init.d/modemmanager stop"
+	else
+		logger -t fm160d "note: ModemManager is installed but not enabled, so the AT port stays ours."
+	fi
+elif [ -x /usr/sbin/ModemManager ] || [ -x /usr/bin/ModemManager ]; then
+	logger -t fm160d "WARNING: ModemManager is present without an init script; check that nothing else is opening ttyUSB."
 fi
 
 exit 0

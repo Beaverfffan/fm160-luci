@@ -202,27 +202,68 @@ static int tty_usb_ids(const char *name, char *out, size_t outlen, int *iface)
 }
 
 /*
- * Probe order within one scan.  The Fibocom serial layout is
- * 0=DIAG 1=NMEA 2=AT 3=MODEM, and only iface 2 answers "AT".  Probing 0 and 1
- * first costs two full 4 s timeouts before the daemon can find its port, so
- * iface 2 goes first.  This is a HINT only -- the probe still has the final
- * say, so a wrong guess costs one timeout and can never select a port that
- * does not actually answer.
+ * Probe order within one scan.  The vendor's serial layout is documented as
+ * 0=DIAG 1=NMEA 2=AT 3=MODEM, and it is a useful starting point -- but it is
+ * NOT what this module actually does.  Measured on FM160-CN 89614.1000.00.04.01.02
+ * (mode 32, QMI) on 2026-09-18, four probes per interface, 2 s each:
+ *
+ *   iface 0  silent    -- not one byte back, so it can only ever cost a timeout
+ *   iface 1  answers   -- "AT" -> OK in 20 ms, ATI returns the full 142-byte
+ *                         identity.  It emits NO NMEA at all (an end flag that
+ *                         can never match captured only the OK), so the
+ *                         "1=NMEA" label is wrong here.
+ *   iface 2  answers   -- the port the datasheet promises
+ *   iface 3  echoes    -- partial_response on timeout is our own "AT\r\n\r\n":
+ *                         echoed, but no AT interpreter behind it
+ *
+ * So there are TWO usable AT ports, and iface 1 is a real fallback rather than
+ * dead weight.  Ordering iface 1 second means the common failure -- iface 2
+ * momentarily busy after a re-enumeration -- costs one probe instead of a
+ * wasted timeout on the near-dead iface 3.
+ *
+ * This is a HINT only.  The probe still has the final say, so a wrong guess
+ * costs time and can never select a port that does not actually answer.
  */
 enum cand_class {
-	CAND_FIBOCOM_AT = 0,   /* Fibocom, interface 2 */
+	CAND_FIBOCOM_AT = 0,   /* Fibocom, interface 2 -- the designated AT port */
+	CAND_FIBOCOM_AT2,      /* Fibocom, interface 1 -- second AT port, verified */
 	CAND_FIBOCOM,          /* Fibocom, some other interface */
 	CAND_UNKNOWN,          /* idVendor unreadable: take it, but say so */
-	CAND_FOREIGN,          /* positively identified as another vendor */
+	CAND_SILENT,           /* known not to answer AT: see cand_class_for() */
 	CAND_CLASSES
+	/* Foreign ports need no class: they are dropped outright below. */
 };
+
+/*
+ * Rank a Fibocom interface by how likely it is to answer "AT".
+ *
+ * Returns CAND_SILENT for interfaces this module has been measured never to
+ * answer on.  Those are held back rather than thrown away -- see the emission
+ * loop in fm160_scan_candidates(): if they are the ONLY thing present, they are
+ * still tried.  Dropping a real AT port means the daemon never comes up at all,
+ * which is a far worse failure than spending one timeout, and a future USB
+ * mode could move AT back to interface 0.
+ */
+static int cand_class_for(int iface)
+{
+	switch (iface) {
+	case 2:
+		return CAND_FIBOCOM_AT;
+	case 1:
+		return CAND_FIBOCOM_AT2;
+	case 0:
+		return CAND_SILENT;
+	default:
+		return CAND_FIBOCOM;
+	}
+}
 
 static void fm160_scan_candidates(void)
 {
 	struct { char name[32]; int cls; int iface; } found[FM160_CAND_MAX];
 	DIR *d;
 	struct dirent *de;
-	int nfound = 0, n_vid = 0, n_unknown = 0, n_foreign = 0;
+	int nfound = 0, n_vid = 0, n_unknown = 0, n_foreign = 0, n_silent = 0;
 	int cls, i;
 	char sig[256] = "";
 	size_t off = 0;
@@ -260,8 +301,9 @@ static void fm160_scan_candidates(void)
 			n_foreign++;
 			continue;
 		} else {
-			found[nfound].cls = (iface == 2) ? CAND_FIBOCOM_AT
-							 : CAND_FIBOCOM;
+			found[nfound].cls = cand_class_for(iface);
+			if (found[nfound].cls == CAND_SILENT)
+				n_silent++;
 			n_vid++;
 		}
 		found[nfound].iface = iface;
@@ -270,8 +312,11 @@ static void fm160_scan_candidates(void)
 	closedir(d);
 
 	/* Emit in class order; the array is stable, so ports keep readdir order
-	 * inside a class. */
-	for (cls = 0; cls < CAND_CLASSES; cls++)
+	 * inside a class.  CAND_SILENT is skipped here and considered only if
+	 * the loop above produced nothing at all. */
+	for (cls = 0; cls < CAND_CLASSES; cls++) {
+		if (cls == CAND_SILENT)
+			continue;
 		for (i = 0; i < nfound; i++) {
 			if (found[i].cls != cls)
 				continue;
@@ -279,6 +324,20 @@ static void fm160_scan_candidates(void)
 				 FM160_PORT_MAX, "%s", found[i].name);
 			g_state.cand_count++;
 		}
+	}
+
+	if (g_state.cand_count == 0 && n_silent > 0) {
+		fm160_log(LOG_WARNING,
+			  "only interfaces that never answer are present; "
+			  "probing them anyway (%d)", n_silent);
+		for (i = 0; i < nfound; i++) {
+			if (found[i].cls != CAND_SILENT)
+				continue;
+			snprintf(g_state.cand[g_state.cand_count],
+				 FM160_PORT_MAX, "%s", found[i].name);
+			g_state.cand_count++;
+		}
+	}
 
 	/* Only speak when the picture actually changed.  This function is called
 	 * once per failed sweep, and the old unconditional log made a 5 s rescan
@@ -325,8 +384,9 @@ static void fm160_scan_candidates(void)
 
 		fm160_log(LOG_INFO,
 			  "AT candidates: %d Fibocom (%s:*), %d unclassified, "
-			  "%d foreign | probe order: %s",
-			  n_vid, FM160_VENDOR_ID, n_unknown, n_foreign, order);
+			  "%d foreign, %d held back as silent | probe order: %s",
+			  n_vid, FM160_VENDOR_ID, n_unknown, n_foreign, n_silent,
+			  order);
 	} else if (n_foreign || n_unknown) {
 		fm160_log(LOG_INFO,
 			  "no AT candidate: %d foreign tty(s), %d unclassified",
