@@ -1385,8 +1385,6 @@ int fm160_bands_command(char *out, size_t outlen, const char *bands_csv)
 	/* Validate before building: only digits and commas get into a command
 	 * line.  A stray space or letter would change the meaning of the band
 	 * list, so anything else is rejected rather than trimmed. */
-	if (!bands_csv[0])
-		return -1;
 	for (p = bands_csv; *p; p++) {
 		if (*p >= '0' && *p <= '9') {
 			n++;
