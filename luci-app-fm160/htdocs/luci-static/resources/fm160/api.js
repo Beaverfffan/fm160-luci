@@ -41,7 +41,7 @@ var callEnabled  = rpc.declare({ object: 'fm160', method: 'enabled',  params: [ 
  * the active profile can NEVER be inferred from VID:PID.  Read it back with
  * AT+GTUSBMODE?.
  */
-var USB_PLATFORM = { vid: '2cb7', pidPrefix: '010' };
+var USB_PLATFORM = { vid: '2cb7' };
 
 var USB_MODES = {
 	17: { pid: '0x0104', kind: 'qmi',  has_at: true,  fm160: true,
@@ -74,6 +74,30 @@ var USB_MODES = {
 	      layout: 'DIAG+MODEM+AT+PIPE+ECM+ECM' }
 };
 
+/* Every PID the FM160 port table (表 1) lists, derived from USB_MODES so that a
+ * mode added above cannot be forgotten here.
+ *
+ * This used to be a string prefix test -- "0x0104 starts with 010" -- which
+ * quietly cut the set short, because 0x0110 (mode 29) and 0x0111 (mode 30) do
+ * not start with 010.  The consequence was a lock-out rather than a cosmetic
+ * bug: switching to MBIM re-enumerates the modem as 0x0111, usbPlatformKnown()
+ * would then answer "not an FM160", candidates() would return nothing, and the
+ * QMI profile the user came from could never be offered again.  Enumerate the
+ * PIDs instead of guessing at them. */
+var FM160_PIDS = (function() {
+	var seen = {}, out = [];
+
+	Object.keys(USB_MODES).forEach(function(m) {
+		var pid = USB_MODES[m].pid;
+
+		if (!pid || seen[pid])
+			return;
+		seen[pid] = true;
+		out.push(normHex(pid, 4));
+	});
+	return out;
+})();
+
 /* Modes that expose no AT interface.  Switching to one of these removes the
  * only management channel this whole application depends on, and there is no
  * way back from the OS side: the FM160 has no reset-to-default that we can
@@ -83,6 +107,35 @@ var USB_MODES = {
  * not reported here but does appear in the vendor port tables, so it stays as
  * a guard for other firmware builds. */
 var USB_MODE_BLACKLIST = [ 20, 24, 28, 31 ];
+
+/*
+ * Modes whose AT interface the KERNEL will not enumerate, even though the modem
+ * does provide one.  This is a different failure from the blacklist above and
+ * deserves its own name, because the USB descriptor looks fine -- the AT
+ * interface is right there in the port table -- and only the host side is
+ * missing.
+ *
+ * drivers/usb/serial/option.c matches on VID:PID before it looks at anything
+ * else, so a PID with no entry means no ttyUSB is created for any interface.
+ * For the Fibocom 0x2cb7 family that file carries entries for exactly
+ * 0x0104, 0x0105, 0x0106, 0x010a, 0x010b and 0x0111 (checked against the
+ * 6.6.127 source that ships with the build tree, and against every
+ * target/linux patch in it: nothing adds more).
+ *
+ *   0x0107 mode 20   absent   0x010f mode 28   absent
+ *   0x0108 mode 21   absent   0x0110 mode 29   absent
+ *   0x0109 mode 22   absent
+ *
+ * Of the modes this firmware offers, 21 and 29 are the ones where that matters,
+ * because those two DO have an AT interface.  Switching to 29 would strand the
+ * modem with no management channel at all -- the exact outcome this project
+ * refuses to risk -- while mode 21 would leave the AT port on ttyUSB1 instead
+ * of the usual ttyUSB2 and so be reachable only by hand.
+ *
+ * Clearing this list is a one-line kernel patch per PID; until that ships, the
+ * UI must not offer these modes.
+ */
+var USB_MODE_NO_KERNEL_DRIVER = [ 21, 29 ];
 
 /*
  * Hardware-verified mode set.
@@ -103,10 +156,15 @@ var USB_MODE_HW = [ 17, 18, 20, 21, 24, 29, 30, 31, 32, 33 ];
  *
  * This firmware offers no NCM, RNDIS or GobiNet target, so only the QMI, ECM
  * and MBIM families are reachable -- which matches the project's scope of
- * "QMI / MBIM / ECM only". */
+ * "QMI / MBIM / ECM only".
+ *
+ * MBIM lists 30 only.  29 is the other MBIM mode this firmware offers and it
+ * is normally the better-looking one (fewer endpoints), but 0x0110 has no
+ * option.c entry, so its AT port does not exist on the host side; see
+ * USB_MODE_NO_KERNEL_DRIVER.  Keep this list in step with that one. */
 var USB_MODE_PREFERRED = {
 	qmi:  [ 32, 17 ],
-	mbim: [ 30, 29 ],
+	mbim: [ 30 ],
 	ecm:  [ 33, 18 ]
 };
 
@@ -120,12 +178,21 @@ function normHex(v, width) {
 	return s.padStart(width, '0');
 }
 
-/* true only for the platform whose mode table we actually know. */
+/* True only for the platform whose mode table we actually know.
+ *
+ * The VID alone is not enough -- 0x2cb7 is Fibocom's own VID and also carries
+ * FM650-CN (0x0a04-0x0a07), FG132 (0x0112), FM135 (0x0115) and FM101-GL
+ * (0x01a2-0x01a4), whose mode numbers mean something else entirely.  Requiring
+ * the PID to be one of the FM160 port table's is what makes the mode numbers
+ * meaningful.
+ *
+ * It must accept EVERY FM160 PID, including the ones reached by switching:
+ * if it stops recognising the device after a switch, the way back disappears. */
 function usbPlatformKnown(idVendor, idProduct) {
 	if (!idVendor || !idProduct)
 		return false;
 	return normHex(idVendor, 4) === USB_PLATFORM.vid &&
-	       normHex(idProduct, 4).indexOf(USB_PLATFORM.pidPrefix) === 0;
+	       FM160_PIDS.indexOf(normHex(idProduct, 4)) >= 0;
 }
 
 /* Any mode number the modem reports that this table does not describe. */
@@ -149,8 +216,20 @@ function usbModeHwSupported(mode) {
 	return USB_MODE_HW.indexOf(Number(mode)) >= 0;
 }
 
+/* False when the host has no driver for this PID, so the AT port will not
+ * appear no matter how healthy the modem is. */
+function usbModeKernelReachable(mode) {
+	return USB_MODE_NO_KERNEL_DRIVER.indexOf(Number(mode)) < 0;
+}
+
 /*
  * usbModeRisk() -> 'safe' | 'advanced' | 'unknown' | 'forbidden'
+ *
+ * 'forbidden' is the answer for both ways of losing the management channel:
+ * a mode with no AT interface at all, and a mode whose AT interface the kernel
+ * refuses to enumerate.  They are different faults with the same consequence,
+ * and the UI must not offer either.
+ *
  * 'advanced'/'unknown' mean: we cannot prove the AT port survives the switch,
  * so the UI must ask for an explicit confirmation first.
  */
@@ -158,6 +237,8 @@ function usbModeRisk(mode) {
 	if (!usbModeKnown(mode))
 		return 'unknown';
 	if (!usbModeHasAt(mode))
+		return 'forbidden';
+	if (!usbModeKernelReachable(mode))
 		return 'forbidden';
 	return USB_MODES[mode].fm160 ? 'safe' : 'advanced';
 }
@@ -362,7 +443,10 @@ function atHealth(state) {
 
 return baseclass.extend({
 	USB_MODES: USB_MODES,
+	USB_PLATFORM: USB_PLATFORM,
+	FM160_PIDS: FM160_PIDS,
 	USB_MODE_BLACKLIST: USB_MODE_BLACKLIST,
+	USB_MODE_NO_KERNEL_DRIVER: USB_MODE_NO_KERNEL_DRIVER,
 	USB_MODE_PREFERRED: USB_MODE_PREFERRED,
 	USB_MODE_HW: USB_MODE_HW,
 	USB_MODE_NONE: NONE,
@@ -383,6 +467,7 @@ return baseclass.extend({
 	usbModeHasAt: usbModeHasAt,
 	usbModeDocumented: usbModeDocumented,
 	usbModeHwSupported: usbModeHwSupported,
+	usbModeKernelReachable: usbModeKernelReachable,
 	usbModeRisk: usbModeRisk,
 	usbModePidClash: usbModePidClash,
 	isServiceable: isServiceable,
