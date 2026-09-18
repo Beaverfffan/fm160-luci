@@ -87,6 +87,7 @@ return view.extend({
 										api.setEnabled(false).then(self.refresh.bind(self));
 									} }, _('Pause'))
 								  ]) ]);
+						}
 						return api.setEnabled(true).then(self.refresh.bind(self));
 					})
 				}, state.enabled ? _('Pause management') : _('Resume management'))
@@ -146,28 +147,36 @@ return view.extend({
 			[ _('Slowest reply'),  api.fmtAge(state.worst_response_ms) ]
 		];
 
+		var csqRaw = api.csqRawRssi(state);
+		var rsrc = api.rsrpDbm(state);
+		var rsrq = api.rsrqDb(state);
+		var ssRsrp = api.isSsRsrp(state);
+		var rssi = api.rssiDbm(state);
+
 		var reg = [
 			[ _('Operator'),            state.operator || '-' ],
 			[ _('LTE registration'),    api.regName(state.cereg) ],
 			[ _('NR registration'),     api.regName(state.c5greg) ],
 			[ _('Serving RAT'),         state.cell_valid ? api.ratName(state.serving.rat) : '-' ],
-			[ _('Band'),                state.cell_valid && state.serving.band ?
-						    'B' + state.serving.band : '-' ],
-			[ _('RSSI (AT+CSQ)'),       state.csq_rssi == 99 ? _('unknown') :
-						    (state.csq_rssi + ' (' + api.fmtDbm(state.rssi_dbm) + ')') ],
-			[ _('RSRP'),                api.fmtDbm(state.cesq && state.cesq.rsrp_dbm) ],
-			[ _('RSRQ'),
-			  state.cesq && state.cesq.rsrq_db10 !== undefined ?
-				((state.cesq.rsrq_db10 / 10).toFixed(1) + ' dB') : '-' ],
+			[ _('Band'),                state.cell_valid && api.cellBand(state.serving) ?
+						    api.fmtBand(api.cellBand(state.serving)) : '-' ],
+			/* 99 is AT+CSQ's "not measurable"; on the 5G path the same field
+			 * carries SS-RSRP, so label it as what it actually is. */
+			[ ssRsrp ? _('SS-RSRP (AT+CSQ)') : _('RSSI (AT+CSQ)'),
+			  csqRaw === 99 ? _('unknown') :
+			  ssRsrp       ? api.fmtDbm(rsrc)
+				       : (api.fmtNum(csqRaw) + ' (' + api.fmtDbm(rssi) + ')') ],
+			[ _('RSRP'),                api.fmtDbm(rsrc) ],
+			[ _('RSRQ'),                rsrq === null ? '-' : (rsrq.toFixed(1) + ' dB') ],
 			[ _('Last successful AT'),  api.fmtAge(state.last_ok_age_ms) ]
 		];
 
 		var traffic = [
-			[ _('Interface'), state.traffic.netdev || _('not detected') ],
-			[ _('Received'),  api.fmtBytes(state.traffic.rx_bytes) ],
-			[ _('Sent'),      api.fmtBytes(state.traffic.tx_bytes) ],
-			[ _('Down'),      api.fmtRate(state.traffic.rx_bps) ],
-			[ _('Up'),        api.fmtRate(state.traffic.tx_bps) ]
+			[ _('Interface'), api.trafficOf(state).netdev || _('not detected') ],
+			[ _('Received'),  api.fmtBytes(api.trafficOf(state).rx_bytes) ],
+			[ _('Sent'),      api.fmtBytes(api.trafficOf(state).tx_bytes) ],
+			[ _('Down'),      api.fmtRate(api.trafficOf(state).rx_bps) ],
+			[ _('Up'),        api.fmtRate(api.trafficOf(state).tx_bps) ]
 		];
 
 		this.body.innerHTML = '';
@@ -176,14 +185,17 @@ return view.extend({
 
 		if (state.cell_valid) {
 			var c = state.serving;
+
 			this.body.appendChild(section(_('Serving cell'), kv([
-				[ _('PLMN'),   (c.mcc ? (c.mcc + '-' + c.mnc) : '-') ],
-				[ _('TAC'),    c.tac || '-' ],
-				[ _('Cell ID'), String(c.cellid || '-') ],
-				[ _('EARFCN'), String(c.earfcn || '-') ],
-				[ _('PCI'),    c.pci >= 0 ? String(c.pci) : '-' ],
-				[ _('Bandwidth'),
-				  c.bandwidth ? (c.bandwidth + ' ' + _('RB') ) : '-' ]
+				[ _('PLMN'),     api.cellPlmn(c) || '-' ],
+				[ _('TAC'),      api.fmtNum(api.cellTac(c)) ],
+				[ _('Cell ID'),  api.fmtNum(api.cellCellId(c)) ],
+				[ _('EARFCN'),   api.fmtNum(api.cellEarfcn(c)) ],
+				[ _('PCI'),      api.cellPci(c) === null ? '-' : String(api.cellPci(c)) ],
+				/* fm160d decodes the bandwidth field to MHz; the raw value is
+				 * a 3GPP code point and stays in the status blob for
+				 * diagnostics. */
+				[ _('Bandwidth'), api.fmtBandwidth(c) ]
 			])));
 		}
 

@@ -13,6 +13,34 @@
  * is often the most informative answer.
  */
 
+/*
+ * Commands that need longer than the default timeout, measured on real hardware
+ * (FM160-CN 89614.1000.00.04.01.02 with no SIM inserted -- the worst case,
+ * because several of these block until the modem's own internal timeout):
+ *
+ *   AT+GTPKGVER?  12.9 s      AT+CCID      10.3 s      AT+CPMS?  10.3 s
+ *   AT+CMGF?       5.4 s      AT+CIMI       5.2 s      AT+CGDCONT? 5.2 s
+ *
+ * At a flat 5 s these come back as "timeout", which reads as a broken modem
+ * rather than as a slow query.
+ *
+ * AT+ICCID answers the same question as AT+CCID in 18 ms, so it is offered
+ * instead; AT+CCID stays in the slow table because people type it from habit.
+ */
+var SLOW_MS = {
+	'AT+GTPKGVER?': 20000,
+	'AT+CCID':      20000,
+	'AT+CPMS?':     20000,
+	'AT+CMGF?':     12000,
+	'AT+CIMI':      12000,
+	'AT+CGDCONT?':  12000
+};
+var DEFAULT_TIMEOUT_MS = 5000;
+
+function timeoutFor(cmd) {
+	return SLOW_MS[cmd.toUpperCase()] || DEFAULT_TIMEOUT_MS;
+}
+
 var QUICK = [
 	'AT',
 	'ATI',
@@ -21,7 +49,7 @@ var QUICK = [
 	'AT+CGMR',
 	'AT+CGSN',
 	'AT+CFSN',
-	'AT+CCID',
+	'AT+ICCID',
 	'AT+CPIN?',
 	'AT+CFUN?',
 	'AT+CSQ',
@@ -91,7 +119,7 @@ return view.extend({
 					}, _('Send'))
 				]),
 				E('p', { 'class': 'hint' },
-				  _('Commands are sent raw; fm160d appends the carriage return and waits for OK / ERROR / +CME ERROR. Timeout is 5 s.'))
+				  _('Commands are sent raw; fm160d appends the carriage return and waits for OK / ERROR / +CME ERROR. Most commands time out after 5 s; the ones that are known to be slow on real hardware get up to 20 s.'))
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Common queries')),
@@ -117,7 +145,9 @@ return view.extend({
 
 		this.append('> ' + cmd);
 
-		return api.at(cmd, 5000, '').then(function(res) {
+		var limit = timeoutFor(cmd);
+
+		return api.at(cmd, limit, '').then(function(res) {
 			var status = res && res.status || 'unknown';
 			var text = res && res.response ? res.response.replace(/\r/g, '') : '';
 
@@ -126,6 +156,8 @@ return view.extend({
 				'class': 'label ' + (status === 'ok' ? 'success' :
 						     status === 'error' ? 'warning' : 'danger')
 			}, status));
+			this.statusline.appendChild(E('span', { 'class': 'hint' },
+				' ' + _('limit') + ': ' + (limit / 1000) + ' s'));
 
 			this.append(text.trim() ? text.trimEnd() : _('(empty response)'));
 		}.bind(this)).catch(function(e) {

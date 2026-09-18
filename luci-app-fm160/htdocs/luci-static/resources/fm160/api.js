@@ -211,28 +211,108 @@ function isServiceable(stat) {
 /* Sentinel used by fm160d for "the modem did not report this". */
 var NONE = -1000000;
 
+/*
+ * Every numeric field in the status blob is written with blobmsg_add_u32/u64,
+ * so the -1000000 sentinel reaches JavaScript as 4293967296, not as -1000000.
+ * A plain `value >= 0` test is therefore true for exactly the values it is
+ * meant to reject, and a bare `value` test prints seven-digit rubbish.
+ *
+ * Both encodings are rejected here, along with a missing key -- the whole point
+ * is that no view has to know which field happens to use which encoding.  Real
+ * values (dBm, tenths of a dB, PCI, MHz, band numbers) are all far inside the
+ * magnitude bound.
+ */
+var NONE_MAGNITUDE = 500000;
+
+function reported(v) {
+	return typeof v === 'number' && v > -NONE_MAGNITUDE && v < NONE_MAGNITUDE;
+}
+
+/* A power in dBm, or null.  Legitimate values are always negative. */
+function dbm(v) {
+	return (reported(v) && v < 0) ? v : null;
+}
+
+/* A value carried in tenths of a dB, converted to dB, or null. */
+function db10(v) {
+	return reported(v) ? v / 10 : null;
+}
+
+function csqOf(st)     { return (st && st.csq)     || {}; }
+function cesqOf(st)    { return (st && st.cesq)    || {}; }
+function trafficOf(st) { return (st && st.traffic) || {}; }
+
+/*
+ * AT+CSQ's first field carries RSSI on 2G/3G, but on the 5G path the modem puts
+ * SS-RSRP in it instead; is_ss_rsrp says which.  When it is really an RSRP,
+ * reporting it as an RSSI would be a wrong number under a right label, so the
+ * RSSI accessor refuses and the RSRP accessor takes over.
+ */
+function isSsRsrp(st) { return !!csqOf(st).is_ss_rsrp; }
+
+function rssiDbm(st) {
+	return isSsRsrp(st) ? null : dbm(csqOf(st).rssi_dbm);
+}
+
+/* Raw AT+CSQ fields, for the views that show what the modem literally said. */
+function csqRawRssi(st) { return csqOf(st).raw_rssi; }
+function csqRawBer(st)  { return csqOf(st).raw_ber; }
+
+/*
+ * RSRP/RSRQ for the serving RAT: which of the two CESQ columns is the live one
+ * follows is_ss_rsrp, and if the preferred column is empty the other is used
+ * rather than showing nothing.
+ */
+function rsrpDbm(st) {
+	var c = cesqOf(st), lte = dbm(c.lte_rsrp_dbm), nr = dbm(c.nr_ss_rsrp_dbm);
+
+	return isSsRsrp(st) ? (nr !== null ? nr : lte) : (lte !== null ? lte : nr);
+}
+
+function rsrqDb(st) {
+	var c = cesqOf(st), lte = db10(c.lte_rsrq_db10), nr = db10(c.nr_ss_rsrq_db10);
+
+	return isSsRsrp(st) ? (nr !== null ? nr : lte) : (lte !== null ? lte : nr);
+}
+
+function cesqSinrDb(st) { return db10(cesqOf(st).nr_ss_sinr_db10); }
+
+/* --- one cell row, as published by cell_to_blob() ----------------- */
+
+function cellRsrp(cell)      { return dbm(cell && cell.rsrp_dbm); }
+function cellRsrqDb(cell)    { return db10(cell && cell.rsrq_db10); }
+function cellSinrDb(cell)    { return db10(cell && cell.sinr_db10); }
+function cellBand(cell)      { return (cell && reported(cell.band) && cell.band > 0) ? cell.band : null; }
+function cellPci(cell)       { return (cell && reported(cell.pci)) ? cell.pci : null; }
+function cellBandwidthMhz(cell) {
+	return (cell && reported(cell.bandwidth) && cell.bandwidth > 0) ? cell.bandwidth : null;
+}
+/* 0 and '' both mean "not reported" for these, and neither is worth printing. */
+function cellPlmn(cell)      { return (cell && cell.mcc) ? (cell.mcc + '-' + cell.mnc) : null; }
+function cellTac(cell)       { return (cell && cell.tac) ? cell.tac : null; }
+function cellCellId(cell)    { return (cell && cell.cellid) ? cell.cellid : null; }
+function cellEarfcn(cell)    { return (cell && cell.earfcn) ? cell.earfcn : null; }
+
 function fmtDbm(v) {
-	return (v === undefined || v === null || v <= NONE / 2) ? '-' : (v + ' dBm');
+	return (dbm(v) === null) ? '-' : (v + ' dBm');
 }
 
 /* Values that are transmitted in tenths of a dB. */
 function fmtDb10(v) {
-	if (v === undefined || v === null || v <= NONE / 2)
-		return '-';
-	return (v / 10).toFixed(1) + ' dB';
+	var d = db10(v);
+
+	return (d === null) ? '-' : (d.toFixed(1) + ' dB');
 }
 
 function fmtNum(v, unit) {
-	if (v === undefined || v === null || v <= NONE / 2)
-		return '-';
-	return v + (unit ? ' ' + unit : '');
+	return reported(v) ? (v + (unit ? ' ' + unit : '')) : '-';
 }
 
 /* NR/LTE bandwidth arrives decoded into MHz by fm160d. */
 function fmtBandwidth(cell) {
-	if (!cell || cell.bandwidth === undefined || cell.bandwidth <= NONE / 2)
-		return '-';
-	return cell.bandwidth + ' MHz';
+	var mhz = cellBandwidthMhz(cell);
+
+	return (mhz === null) ? '-' : (mhz + ' MHz');
 }
 
 function fmtBand(band) {
@@ -306,6 +386,29 @@ return baseclass.extend({
 	usbModeRisk: usbModeRisk,
 	usbModePidClash: usbModePidClash,
 	isServiceable: isServiceable,
+	reported: reported,
+	dbm: dbm,
+	db10: db10,
+	csqOf: csqOf,
+	cesqOf: cesqOf,
+	trafficOf: trafficOf,
+	isSsRsrp: isSsRsrp,
+	rssiDbm: rssiDbm,
+	csqRawRssi: csqRawRssi,
+	csqRawBer: csqRawBer,
+	rsrpDbm: rsrpDbm,
+	rsrqDb: rsrqDb,
+	cesqSinrDb: cesqSinrDb,
+	cellRsrp: cellRsrp,
+	cellRsrqDb: cellRsrqDb,
+	cellSinrDb: cellSinrDb,
+	cellBand: cellBand,
+	cellPci: cellPci,
+	cellBandwidthMhz: cellBandwidthMhz,
+	cellPlmn: cellPlmn,
+	cellTac: cellTac,
+	cellCellId: cellCellId,
+	cellEarfcn: cellEarfcn,
 	fmtDbm: fmtDbm,
 	fmtDb10: fmtDb10,
 	fmtNum: fmtNum,

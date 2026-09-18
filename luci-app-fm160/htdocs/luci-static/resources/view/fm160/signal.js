@@ -65,11 +65,16 @@ return view.extend({
 	},
 
 	paint: function(state) {
-		var cesq = state.cesq || {};
-		var rssi = state.rssi_dbm !== undefined ? state.rssi_dbm : cesq.rssi_dbm;
-		var rsrp = cesq.rsrp_dbm;
-		var rsrq = cesq.rsrq_db10 !== undefined ? cesq.rsrq_db10 / 10 : undefined;
-		var sinr = state.cell_valid ? state.serving.sinr : undefined;
+		/* Field names live in api.js, not here: the daemon casts its "not
+		 * reported" sentinel to uint32, so which test rejects it depends on the
+		 * field, and a view that guesses will print 4293967296 as a signal
+		 * strength.  Each accessor returns a number or null. */
+		var rssi = api.rssiDbm(state);
+		var rsrp = api.rsrpDbm(state);
+		var rsrq = api.rsrqDb(state);
+		/* The serving cell's SINR is the one worth showing; CESQ's SS-SINR is
+		 * only a fallback for before the first cell poll has landed. */
+		var sinr = state.cell_valid ? api.cellSinrDb(state.serving) : api.cesqSinrDb(state);
 
 		this.banner.innerHTML = '';
 		if (!state.cell_valid)
@@ -79,25 +84,28 @@ return view.extend({
 		this.metrics.innerHTML = '';
 		this.metrics.appendChild(metric('RSSI',
 			api.fmtDbm(rssi),
-			_('from AT+CSQ / AT+CESQ rxlev'),
+			api.isSsRsrp(state) ? _('not applicable - CSQ carries SS-RSRP on this link')
+					    : _('from AT+CSQ'),
 			scale(rssi, -113, -51)));
 		this.metrics.appendChild(metric('RSRP',
 			api.fmtDbm(rsrp),
 			_('reference signal received power'),
 			scale(rsrp, -140, -70)));
 		this.metrics.appendChild(metric('RSRQ',
-			rsrq === undefined ? '-' : (rsrq.toFixed(1) + ' dB'),
+			rsrq === null ? '-' : (rsrq.toFixed(1) + ' dB'),
 			_('reference signal received quality'),
-			rsrq === undefined ? null : scale(rsrq, -20, -3)));
+			rsrq === null ? null : scale(rsrq, -20, -3)));
 		this.metrics.appendChild(metric('SINR',
-			sinr === undefined ? '-' : (sinr + ' dB'),
+			sinr === null ? '-' : (sinr.toFixed(1) + ' dB'),
 			_('signal to interference plus noise'),
-			sinr === undefined ? null : scale(sinr, -20, 30)));
+			sinr === null ? null : scale(sinr, -20, 30)));
 
 		this.tables.innerHTML = '';
 
 		if (state.cell_valid) {
 			var c = state.serving;
+			var crsrp = api.cellRsrp(c), crsrq = api.cellRsrqDb(c), csinr = api.cellSinrDb(c);
+			var cpci = api.cellPci(c), cband = api.cellBand(c);
 
 			this.tables.appendChild(E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Serving cell')),
@@ -116,15 +124,15 @@ return view.extend({
 					]),
 					E('tr', { 'class': 'tr' }, [
 						E('td', { 'class': 'td' }, api.ratName(c.rat)),
-						E('td', { 'class': 'td' }, c.mcc ? (c.mcc + '-' + c.mnc) : '-'),
-						E('td', { 'class': 'td' }, String(c.tac || '-')),
-						E('td', { 'class': 'td' }, String(c.cellid || '-')),
-						E('td', { 'class': 'td' }, String(c.earfcn || '-')),
-						E('td', { 'class': 'td' }, c.pci >= 0 ? String(c.pci) : '-'),
-						E('td', { 'class': 'td' }, c.band ? ('B' + c.band) : '-'),
-						E('td', { 'class': 'td' }, api.fmtDbm(c.rsrp)),
-						E('td', { 'class': 'td' }, c.rsrq ? (c.rsrq + ' dB') : '-'),
-						E('td', { 'class': 'td' }, c.sinr ? (c.sinr + ' dB') : '-')
+						E('td', { 'class': 'td' }, api.cellPlmn(c) || '-'),
+						E('td', { 'class': 'td' }, api.fmtNum(api.cellTac(c))),
+						E('td', { 'class': 'td' }, api.fmtNum(api.cellCellId(c))),
+						E('td', { 'class': 'td' }, api.fmtNum(api.cellEarfcn(c))),
+						E('td', { 'class': 'td' }, cpci === null ? '-' : String(cpci)),
+						E('td', { 'class': 'td' }, api.fmtBand(cband)),
+						E('td', { 'class': 'td' }, api.fmtDbm(crsrp)),
+						E('td', { 'class': 'td' }, crsrq === null ? '-' : (crsrq.toFixed(1) + ' dB')),
+						E('td', { 'class': 'td' }, csinr === null ? '-' : (csinr.toFixed(1) + ' dB'))
 					])
 				])
 			]));
@@ -145,15 +153,17 @@ return view.extend({
 			]) ];
 
 			neigh.forEach(function(n, i) {
+				var npci = api.cellPci(n), nrsrq = api.cellRsrqDb(n), nsinr = api.cellSinrDb(n);
+
 				rows.push(E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td' }, String(i + 1)),
 					E('td', { 'class': 'td' }, api.ratName(n.rat)),
-					E('td', { 'class': 'td' }, String(n.earfcn || '-')),
-					E('td', { 'class': 'td' }, n.pci >= 0 ? String(n.pci) : '-'),
-					E('td', { 'class': 'td' }, n.band ? ('B' + n.band) : '-'),
-					E('td', { 'class': 'td' }, api.fmtDbm(n.rsrp)),
-					E('td', { 'class': 'td' }, n.rsrq ? (n.rsrq + ' dB') : '-'),
-					E('td', { 'class': 'td' }, n.sinr ? (n.sinr + ' dB') : '-')
+					E('td', { 'class': 'td' }, api.fmtNum(api.cellEarfcn(n))),
+					E('td', { 'class': 'td' }, npci === null ? '-' : String(npci)),
+					E('td', { 'class': 'td' }, api.fmtBand(api.cellBand(n))),
+					E('td', { 'class': 'td' }, api.fmtDbm(api.cellRsrp(n))),
+					E('td', { 'class': 'td' }, nrsrq === null ? '-' : (nrsrq.toFixed(1) + ' dB')),
+					E('td', { 'class': 'td' }, nsinr === null ? '-' : (nsinr.toFixed(1) + ' dB'))
 				]));
 			});
 
