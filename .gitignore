@@ -1,0 +1,22 @@
+# Local hardware-probe scratch.  _probe/ holds the captured AT transcripts used
+# while reverse-engineering the module on real hardware, plus verbatim copies of
+# QModem's own vendor scripts that were pulled off the test router.  It stays
+# out of the published tree on purpose: the transcripts contain real device
+# identifiers (IMEI, serial number) and the vendor scripts are upstream's work,
+# not ours.  The findings that matter are written up in docs/HARDWARE-PROBE.md.
+_probe/
+_probe-*/
+
+# Build products
+*.o
+*.so
+*.ipk
+*.apk
+fm160d/fm160d
+fm160d/src/fm160d
+at-daemon/src/ubus-at-daemon
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store

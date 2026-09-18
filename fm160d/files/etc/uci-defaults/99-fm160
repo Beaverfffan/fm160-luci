@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# fm160d ships a sane /etc/config/fm160, so there is nothing to migrate yet.
+# What we do need is to make sure no other modem manager fights us for the AT
+# port: fm160d is designed to be the single owner.
+
+[ -f /etc/config/fm160 ] || exit 0
+
+# Warn (once) if ModemManager is installed - it opens every ttyUSB it finds and
+# will interleave with our transactions.
+if [ -x /usr/sbin/ModemManager ] || [ -x /usr/bin/ModemManager ]; then
+	logger -t fm160d "WARNING: ModemManager is installed; it will compete for the FM160 AT port. Disable it or remove it."
+fi
+
+exit 0

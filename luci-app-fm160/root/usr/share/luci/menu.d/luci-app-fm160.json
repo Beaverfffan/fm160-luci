@@ -1,0 +1,36 @@
+{
+	"admin/fm160": {
+		"title": "FM160",
+		"order": 45,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-fm160" ]
+		}
+	},
+	"admin/fm160/overview": {
+		"title": "概览",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "fm160/overview"
+		}
+	},
+	"admin/fm160/signal": {
+		"title": "信号",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "fm160/signal"
+		}
+	},
+	"admin/fm160/debug": {
+		"title": "AT 调试",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "fm160/debug"
+		}
+	}
+}

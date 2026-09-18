@@ -1,0 +1,17 @@
+{
+	"luci-app-fm160": {
+		"description": "Grant access to the Fibocom FM160 modem manager",
+		"read": {
+			"ubus": {
+				"fm160": [ "status", "identity", "profile" ]
+			},
+			"uci": [ "fm160" ]
+		},
+		"write": {
+			"ubus": {
+				"fm160": [ "at", "rescan", "ident", "enabled", "profile" ]
+			},
+			"uci": [ "fm160" ]
+		}
+	}
+}

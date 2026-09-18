@@ -1,0 +1,17 @@
+config fm160 'main'
+	option enabled '1'
+
+	# Polling pace multiplier applied to every tier (1 = designed defaults,
+	# 2 = half as often, up to 6).  Raise it if the modem ever looks busy.
+	option tier_scale '1'
+
+	# Optional: pin the AT port instead of probing.  Leave unset normally so
+	# that USB re-enumeration is handled automatically.
+	# option port '/dev/ttyUSB2'
+
+	# Optional: pin the netdev used for the sysfs byte counters (zero AT cost).
+	# Auto-detected from wwan0 / usb0 when unset.
+	# option netdev 'wwan0'
+
+	# syslog level: 3=err 4=warn 6=info 7=debug
+	option log_level '6'
