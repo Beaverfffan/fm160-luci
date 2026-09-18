@@ -96,14 +96,25 @@ void fm160_config_load(void)
 			g_state.tier_scale = n;
 	}
 
-	if (!uci_get("netdev", v, sizeof(v)))
-		snprintf(g_state.netdev, sizeof(g_state.netdev), "%s", v);
+	if (!uci_get("netdev", v, sizeof(v))) {
+		if (snprintf(g_state.netdev, sizeof(g_state.netdev), "%s", v) >=
+		    (int)sizeof(g_state.netdev)) {
+			g_state.netdev[0] = '\0';
+			fm160_log(LOG_WARN,
+				  "config netdev '%s' too long, ignored", v);
+		}
+	}
 
 	/* A manually pinned AT port skips discovery (useful while debugging). */
 	if (!uci_get("port", v, sizeof(v))) {
-		snprintf(g_state.cand[0], FM160_PORT_MAX, "%s", v);
-		g_state.cand_count = 1;
-		fm160_log(LOG_INFO, "AT port pinned to %s by config", v);
+		if (snprintf(g_state.cand[0], FM160_PORT_MAX, "%s", v) >=
+		    FM160_PORT_MAX) {
+			fm160_log(LOG_WARN,
+				  "config port '%s' too long, ignored", v);
+		} else {
+			g_state.cand_count = 1;
+			fm160_log(LOG_INFO, "AT port pinned to %s by config", v);
+		}
 	}
 
 	if (!uci_get("log_level", v, sizeof(v))) {

@@ -38,23 +38,6 @@ static int csv_int(const char *s, int idx, int fallback)
 	return atoi(p);
 }
 
-static long long csv_ll(const char *s, int idx, long long fallback)
-{
-	const char *p = s;
-	int i = 0;
-
-	while (i < idx) {
-		p = strchr(p, ',');
-		if (!p)
-			return fallback;
-		p++;
-		i++;
-	}
-	if (!*p)
-		return fallback;
-	return strtoll(p, NULL, 10);
-}
-
 /* GTCCINFO prints <tac>, <cell_id>, <earfcn> and <physicalcellId> as hex with
  * no 0x prefix; everything else in the same row is decimal.
  *

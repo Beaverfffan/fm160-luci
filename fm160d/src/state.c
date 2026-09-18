@@ -11,9 +11,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "fm160d.h"
+
+/*
+ * Monotonic milliseconds - the single clock behind every deadline in this
+ * daemon (poll jitter, backoff, quiet windows, cache ages).  It deliberately
+ * is not the wall clock: an NTP step or a manual `date` would otherwise make a
+ * timer fire instantly or hang for hours.  libubox exposes its timers but no
+ * public clock helper, so this is a two-line wrapper over CLOCK_MONOTONIC.
+ */
+uint64_t fm160_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000);
+}
 
 static bool dirty = true;
 static uint64_t netdev_last_ms;

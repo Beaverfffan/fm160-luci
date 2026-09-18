@@ -5,10 +5,11 @@
 | 项 | 值 |
 |---|---|
 | 来源 | `https://github.com/FUjr/QModem` → `application/ubus_at_daemon/` |
-| 取用版本 | 2026-09-18 的 `main` 分支 |
+| 取用版本 | `main` @ `86102c2a6f62`（2026-09-11 的 tip） |
 | 上游许可证 | MPL-2.0 **+ 附加条款「禁止商业使用」** |
-| 本地改动 | 仅 2 处，见下 |
+| 本地改动 | 仅 3 处，见下 |
 | 本地记录 | 上游文件原样保留其版权头 |
+| 一致性 | `src/` 10 个文件 + `files/` 2 个文件，**逐个用 git blob sha1 校验与上游逐字节一致**（哈希表见 `NOTICE.md`） |
 
 ## 为什么复用
 
@@ -28,12 +29,17 @@
 | 溢出检测 | 事件字段 `drop_count` | 检测事件队列丢行 |
 | 端口掉线重连 | 内部 monitor 线程 | 拔插模块自愈 |
 
-## 本地改动（仅此两处）
+## 本地改动（仅此三处）
 
 1. **移除 feed 依赖**：上游 `Makefile` 里 `include ../../version.mk` 指向 QModem feed 根目录，改为 `include ./version.mk`，并在本目录新增 `version.mk`。
 2. **补许可证字段**：加 `PKG_LICENSE:=MPL-2.0` 与 `PKG_MAINTAINER`，让 `make menuconfig` 能正确显示归属。
+3. **声明 `conffiles`**：`/etc/config/ubus-at-daemon`。不声明的话 `opkg upgrade` 会直接覆盖设备上改过的配置。
 
-除这两处外，`src/` 与 `files/` 与上游逐字节一致。
+`src/` 与 `files/` 与上游逐字节一致（blob 哈希见 `NOTICE.md`）。
+
+> ⚠️ **行尾必须是 LF。** `files/etc/init.d/ubus-at-daemon` 曾经是 CRLF（386 → 411 字节，每行多一个 `\r`）。这种文件能编译、能打包、能安装，然后在设备上**静默不启动**——内核把解释器读成 `"/bin/sh /etc/rc.common\r"`，那个路径不存在。已修正为 LF（因此现在与上游逐字节一致），并加了 `_tools/cccheck/eolcheck.py` 防回归。
+>
+> ⚠️ 构建时唯一的警告来自上游 `src/main.c:3`：它无条件 `#define ARRAY_SIZE`，而 `libubox/utils.h` 用 `#ifndef` 守卫自己的同名宏。两个定义**逐字相同**，所以只是噪声。**有意不修**——改了就不再是逐字节的 vendor 副本，`NOTICE.md` 的溯源也就失效了，代价换不来收益。
 
 ## 两阶段命令（M3 短信）：**无需修改上游**
 
@@ -80,3 +86,20 @@ sendat { raw_at_content:"<PDU hex>1A", end_flag:"OK", timeout:60000 }
 那是 **QModem 的旧版**（脚本回调模型）。本目录复用的是上游 `main` 的**新版**，
 有上表 11 个方法与完整行事件。**在载机上做事件联调前，必须先确认跑的是哪一份**，
 否则会把"版本差异"误判成"代码 bug"。
+
+## 构建实测
+
+2026-09-18 在 iStoreOS `istoreos-24.10` @ `b1bb87394452` 树里真编通过：
+
+```
+ubus-at-daemon_2026.09.18-vendored-r1_aarch64_generic.ipk   16965 B   rc=0
+Depends: libc, libubus20250102, libubox20240329, libblobmsg-json20240329, libjson-c5
+```
+
+- ELF64 / AArch64，`DT_NEEDED` 里的库版本与 H69K 上已装的**完全一致**。
+- `control.tar.gz` 含 `conffiles`（`/etc/config/ubus-at-daemon`），升级时配置受保护。
+- 该 ipk 的 `Depends` 与 QModem 那份一致，只多一个 `ubus-at-daemon` 自身的包名归属——
+  也就是说装到 H69K 上会**把 QModem 的 3.0.2-r2 换成本地这份**（版本号更大），
+  这正是预期的：`fm160d` 需要 `urc_register` 等新方法。
+
+**尚未在设备上装过、跑过。** 上面是编译与打包层面的验证，不含运行期行为。

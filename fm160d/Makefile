@@ -35,11 +35,21 @@ define Build/Prepare
 	$(CP) ./src/* $(PKG_BUILD_DIR)/
 endef
 
+# -Wextra is worth keeping for -Wformat-truncation, which caught five silent
+# truncations in this code.  -Wno-unused-parameter only mutes the ubus method
+# handlers, whose signature is fixed by the API and cannot shrink to the
+# argument subset each handler actually uses.
+FM160D_CFLAGS = $(TARGET_CFLAGS) -Wall -Wextra -Wno-unused-parameter
+
 define Build/Compile
 	$(MAKE) -C $(PKG_BUILD_DIR) \
 		$(TARGET_CONFIGURE_OPTS) \
-		CFLAGS="$(TARGET_CFLAGS) -Wall -Wextra -I$(STAGING_DIR)/usr/include" \
+		CFLAGS="$(FM160D_CFLAGS) -I$(STAGING_DIR)/usr/include" \
 		LDFLAGS="$(TARGET_LDFLAGS)"
+endef
+
+define Package/fm160d/conffiles
+/etc/config/fm160
 endef
 
 define Package/fm160d/install

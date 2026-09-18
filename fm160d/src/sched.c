@@ -140,6 +140,21 @@ static void item_arm(struct poll_item *it)
 /* port discovery                                                       */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Record /dev/<name> as an AT candidate.  A name that would not fit is dropped
+ * rather than stored truncated: a cut-off device path is worse than a missing
+ * one, because it survives discovery and only fails much later at open().
+ */
+static void add_candidate(const char *name)
+{
+	int n = snprintf(g_state.cand[g_state.cand_count], FM160_PORT_MAX,
+			 "/dev/%s", name);
+
+	if (n < 0 || n >= FM160_PORT_MAX)
+		return;
+	g_state.cand_count++;
+}
+
 static void fm160_scan_candidates(void)
 {
 	DIR *d;
@@ -161,18 +176,19 @@ static void fm160_scan_candidates(void)
 
 		/* /sys/class/tty/ttyUSBn/device -> the USB interface; its parent
 		 * is the USB device which carries idVendor. */
-		snprintf(path, sizeof(path),
-			 "/sys/class/tty/%s/device/../idVendor", name);
+		if (snprintf(path, sizeof(path),
+			     "/sys/class/tty/%s/device/../idVendor",
+			     name) >= (int)sizeof(path))
+			continue;
+
 		if (read_sysfs(path, vid, sizeof(vid)) != 0) {
 			/* layout differs (e.g. some CDC devices): accept anyway */
-			snprintf(g_state.cand[g_state.cand_count++],
-				 FM160_PORT_MAX, "/dev/%s", name);
+			add_candidate(name);
 			continue;
 		}
 		if (strcasecmp(vid, FM160_VENDOR_ID))
 			continue;
-		snprintf(g_state.cand[g_state.cand_count++], FM160_PORT_MAX,
-			 "/dev/%s", name);
+		add_candidate(name);
 	}
 	closedir(d);
 

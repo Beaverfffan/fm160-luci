@@ -36,6 +36,10 @@ define Build/Compile
 		LDFLAGS="$(TARGET_LDFLAGS) -lubus -lubox -lblobmsg_json -ljson-c"
 endef
 
+define Package/$(PKG_NAME)/conffiles
+/etc/config/ubus-at-daemon
+endef
+
 define Package/$(PKG_NAME)/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/ubus-at-daemon $(1)/usr/bin/

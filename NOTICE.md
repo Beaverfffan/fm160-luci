@@ -19,9 +19,9 @@ layer.
 The whole point of vendoring it unmodified is that the AT transport is the one
 piece of this stack that has to be trusted absolutely, so its behaviour should
 be auditable against upstream by hash rather than by reading a diff. All ten
-files under `at-daemon/src/` are byte-identical to the upstream commit above;
-their git blob hashes are listed in `at-daemon/NOTICE.md` and can be re-checked
-at any time.
+files under `at-daemon/src/` **and both files under `at-daemon/files/`** are
+byte-identical to the upstream commit above; their git blob hashes are listed in
+`at-daemon/NOTICE.md` and can be re-checked at any time.
 
 Upstream's own `LICENSE` is carried verbatim as `at-daemon/LICENSE`. It is
 MPL-2.0 with an added clause: **commercial use of the software or any
@@ -34,11 +34,10 @@ boundary.
 
 ## 2. Everything else — original work (MPL-2.0)
 
-`fm160d/`, `luci-app-fm160/`, `docs/` and the packaging around `at-daemon/`
-(`at-daemon/Makefile`, `at-daemon/version.mk`, `at-daemon/files/`,
-`at-daemon/README.md`) were written for this project and are released under the
-**Mozilla Public License 2.0** — see `LICENSE`. That is the same base licence as
-the vendored component, without the extra non-commercial clause.
+`fm160d/`, `luci-app-fm160/` and `docs/` — plus the packaging that wraps the
+vendored component (`at-daemon/Makefile`, `at-daemon/version.mk`,
+`at-daemon/README.md`, `at-daemon/NOTICE.md`) — were written for this project and
+are released under the **Mozilla Public License 2.0**.
 
 ## Not in this repository
 

@@ -20,7 +20,11 @@
 | M5 | GNSS | ⏳ 待做 |
 | M6 | i18n、日志导出、CI | ⏳ 待做 |
 
-**M1 已在真机上验证过一轮**（2026-09-18，H69K + USB 外接 FM160）：代码编译干净，模块身份、USB 模式、注网、信号、小区命令全部实测，凡与真机不符的解析逻辑都已修正，见 `docs/HARDWARE-PROBE.md`。M2 之后的功能仍按约定「先出代码」，依赖设备实际能力处一律运行期探测 + 保守默认 + 显式告警，见 `docs/PLAN.md` §4。
+**M1 已在真机上验证过一轮**（2026-09-18，H69K + USB 外接 FM160）：代码编译干净，模块身份、USB 模式、注网、信号、小区命令全部实测，凡与真机不符的解析逻辑都已修正，见 `docs/HARDWARE-PROBE.md`。
+
+**M1 也已作为真实 OpenWrt 包编出 `.ipk`**（2026-09-18，iStoreOS 24.10 树 @ `b1bb87394452`，恰好是 H69K 在跑的那个版本）：三个包全部 `rc=0`，产物见下方「已实测的构建结果」。此前只有宿主机的 musl 编译检查，那次检查**没能发现**一个只在链接期暴露的缺失符号定义——所以这一环是必需的，不是可选的。
+
+M2 之后的功能仍按约定「先出代码」，依赖设备实际能力处一律运行期探测 + 保守默认 + 显式告警，见 `docs/PLAN.md` §4。
 
 ---
 
@@ -97,7 +101,13 @@ cp -r fm160-luci/luci-app-fm160 <tree>/package/luci-app-fm160
 
 （也可以做成一个 feed：`src-link fm160 /path/to/fm160-luci`，再 `./scripts/feeds update fm160 && ./scripts/feeds install -a -p fm160`。注意 feed 方式下 `fm160-luci` 根目录需要有一个 `Makefile` 或直接指向子目录。）
 
-包目录名要与 `PKG_NAME` 一致：`at-daemon/` 的 `PKG_NAME` 是 **`ubus-at-daemon`**，放错名字不报错，但会与已装 QModem 的机器重名冲突时升级失败。
+包目录名要与 `PKG_NAME` 一致：`at-daemon/` 的 `PKG_NAME` 是 **`ubus-at-daemon`**。
+
+> **装到装了 QModem 的机器上会发生什么。** QModem 自己就带 `ubus-at-daemon`（H69K 上是 `3.0.2-r2`，只有 4 个 ubus 方法），我们把同一个上游项目 vendor 成了 `2026.09.18-vendored-r1`（11 个方法，多了 `lease_*` / `urc_*` 和行事件推送）。**包名相同是必然的，不是疏忽**：`fm160d` 连的是 ubus 对象 `at-daemon`，一个对象只能有一个提供者，两份不可能共存。
+>
+> 后果：`opkg install ubus-at-daemon` 会把它当作**同一软件的升级**替换掉 QModem 那份（我们的版本号更大）。配置文件 `/etc/config/ubus-at-daemon` 两边内容实测逐字相同，且已声明为 `conffiles`，所以不会丢配置；新版本同时保留了 QModem 用的脚本回调模型（`event_callback.c` 仍在），并向 `fm160d` 提供 `urc_register` 等新方法。
+>
+> 想回退就重装 QModem 那份：`opkg install --force-downgrade <qmodem的ubus-at-daemon>.ipk`。
 
 ### 2. 选包与 target
 
@@ -149,6 +159,38 @@ make package/luci-app-fm160/compile   V=s
 产物在 `bin/packages/<arch>/base/`（24.10 线是 `.ipk`，25.12 线起是 `.apk`）。
 
 内存提示：OpenWrt 的 gcc 引导阶段每个 job 可能吃掉几百 MB。H69K 这轮实测机是 16 线程 / 7 GB 内存，`-j8` 稳妥，`-j$(nproc)` 会开始换页。
+
+### 5. 已实测的构建结果（2026-09-18）
+
+载体：iStoreOS `istoreos-24.10` @ `b1bb87394452`，target `rockchip/armv8`，profile `hinlink_opc-h6xk`，`-j8`。
+
+| 阶段 | 耗时 | 结果 |
+|---|---|---|
+| `make tools/install` | 8 min | rc=0 |
+| `make toolchain/install` | 11 min | rc=0 |
+| `make package/ubus-at-daemon/compile` | 14 s | rc=0 |
+| `make package/fm160d/compile` | 13 s | rc=0 |
+| `make package/luci-app-fm160/compile` | 25 s | rc=0 |
+
+产物（`bin/packages/aarch64_generic/base/`）：
+
+```
+fm160d_0.1.0-r1_aarch64_generic.ipk              17856 B
+ubus-at-daemon_2026.09.18-vendored-r1_...ipk     16965 B
+luci-app-fm160_0.1.0-r1_all.ipk                  10641 B
+```
+
+核对过的事实：
+
+- `fm160d` 是 **ELF64 / AArch64 / EXEC**，`DT_NEEDED` = `libubus.so.20250102`、`libubox.so.20240329`、`libblobmsg_json.so.20240329`、`libgcc_s.so.1`、`libc.so`——与设备上已装的库**版本号完全一致**，所以依赖可满足。
+- `control` 的 `Depends` 解析正确：`fm160d` → `libc, libubus20250102, libubox20240329, libblobmsg-json20240329, ubus-at-daemon`。
+- `fm160d` / `ubus-at-daemon` 的 `control.tar.gz` 里都有 `conffiles`（`/etc/config/fm160`、`/etc/config/ubus-at-daemon`），即配置在 `opkg upgrade` 时受保护。
+
+> ⚠️ `conffiles` **不是** `control` 里的一个字段。`scripts/ipkg-build` 把它作为单独文件放进 `control.tar.gz`，opkg 安装时再抽成 `/usr/lib/opkg/info/<pkg>.conffiles`。去 `control` 里 grep `Conffiles:` 永远是空的，别据此以为声明没生效。
+
+> ⚠️ 唯一剩余警告来自 vendor 的 QModem 代码（`ubus-at-daemon` 的 `main.c:3` 无条件 `#define ARRAY_SIZE`，而 `libubox/utils.h` 用 `#ifndef` 守卫）。两个定义逐字相同，属噪声；不修是有意的——改了会破坏 `at-daemon/NOTICE.md` 里的逐字节溯源。**fm160d 本身零警告。**
+
+复现与重编的脚本在 `_tools/istoreos-h69k/`（`01-clone` → `07-verify-artifacts`）。改完 C 源码不必重跑 20 分钟的树构建：`04-sync-packages.sh` 把三个包目录推过去，`06-rebuild-packages.sh` 只重编包，一轮约 1 分钟。
 
 ---
 
