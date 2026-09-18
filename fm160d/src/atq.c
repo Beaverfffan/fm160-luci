@@ -64,9 +64,37 @@ static bool at_daemon_ready(void)
 	return true;
 }
 
+/*
+ * Detach a request from the queue, at most once.
+ *
+ * This guard is not defensive style, it is the fix for a crash that only
+ * appeared once port discovery started working.  libubox is NOT the kernel
+ * list.h: its list_del() is
+ *
+ *     _list_del(entry);                    // entry->next->prev = entry->prev
+ *     entry->next = entry->prev = NULL;    // NULL, not LIST_POISON1/2
+ *
+ * so a second list_del() on the same node dereferences NULL and writes through
+ * it: instant SIGSEGV, before anything can be logged.
+ *
+ * The double delete came from the two halves of the request lifetime each
+ * believing they owned it:
+ *   - atq_dispatch() detaches the request before handing it to at-daemon;
+ *   - sendat_cb() detached it again on the reply.
+ * A request only ever REACHES sendat_cb() by succeeding, and before the port
+ * probe could succeed no request ever completed -- so the second delete was
+ * never executed.  The first successful AT probe killed the daemon, which is
+ * why fm160d logged "reading module identity" and then died in procd's
+ * respawn loop with exit_code 139 (128 + SIGSEGV).
+ *
+ * A live queued node always has non-NULL next/prev (list_add_tail fills them,
+ * INIT_LIST_HEAD points at the head), and list_del() NULLs both, so this test
+ * is exact rather than a guess about state.
+ */
 static void at_req_free(struct at_req *req)
 {
-	list_del(&req->list);
+	if (req->list.next || req->list.prev)
+		list_del(&req->list);
 	free(req);
 }
 
@@ -99,10 +127,26 @@ static void sendat_cb(struct ubus_request *ureq, int type, struct blob_attr *msg
 
 	if (!msg) {
 		status = AT_STATUS_TIMEOUT;
+	} else if (resp && strstr(resp, "ERROR")) {
+		/* Classify on the text BEFORE trusting the transport's status.
+		 *
+		 * at-daemon's default end-flag list contains "ERROR" AND both
+		 * "+CME ERROR:" and "+CME ERROR:", so it treats an error reply
+		 * as a matched terminal flag, returns 0, and reports
+		 * status="success".  "success" therefore means "the exchange
+		 * finished", not "the modem accepted the command".
+		 *
+		 * This was not theoretical: with no SIM, AT+ICCID answers
+		 * "+CME ERROR: 13" and the ident chain stored that string as
+		 * the card's ICCID, which the UI then displayed.
+		 *
+		 * A false positive would need a response whose payload contains
+		 * the literal word ERROR; fm160_resp_error() already makes the
+		 * same assumption everywhere else, so this only moves the rule
+		 * to the choke point. */
+		status = AT_STATUS_ERROR;
 	} else if (rep.status && !strcmp(rep.status, "success")) {
 		status = AT_STATUS_OK;
-	} else if (resp && (strstr(resp, "ERROR"))) {
-		status = AT_STATUS_ERROR;
 	} else {
 		status = AT_STATUS_TIMEOUT;
 	}
@@ -144,8 +188,13 @@ static int atq_issue(struct at_req *req)
 	if (secs < 1)
 		secs = 1;
 
+	/* A request that names its own port wins: that is how the port probe
+	 * talks to a candidate that g_state.port does not describe yet.  Falling
+	 * back to g_state.port is the normal path for everything else. */
+	const char *target = req->port[0] ? req->port : g_state.port;
+
 	blob_buf_init(&b, 0);
-	blobmsg_add_string(&b, "at_port", g_state.port);
+	blobmsg_add_string(&b, "at_port", target);
 	blobmsg_add_string(&b, "at_cmd", req->cmd);
 	blobmsg_add_u32(&b, "timeout", secs);
 	if (req->end_flag[0])
@@ -187,7 +236,14 @@ static void atq_dispatch(void)
 
 	list_del(&best->list);
 
-	if (!g_state.port_found) {
+	/* Only drop work that has nowhere to go.  A request carrying its own port
+	 * must be let through even while port_found is false -- the port probe is
+	 * exactly that request, and it is the only thing that ever SETS
+	 * port_found.  Rejecting it here (which is what this used to do
+	 * unconditionally) meant every probe died with NOPORT before reaching
+	 * at-daemon, so port discovery could never converge and the daemon sat in
+	 * a 5 s rescan loop forever. */
+	if (!best->port[0] && !g_state.port_found) {
 		if (best->cb)
 			best->cb(best, AT_STATUS_NOPORT, NULL, best->arg);
 		free(best);
@@ -255,6 +311,12 @@ static int atq_submit_full(enum at_prio prio, const char *cmd,
 	req->cb = cb;
 	req->arg = arg;
 	req->silent = silent;
+	/* Recorded, not merely used as a gate.  The override used to be consulted
+	 * only to decide whether to skip the port_found check, and then thrown
+	 * away -- so the probe passed the gate and was still sent on
+	 * g_state.port (empty), and failed. */
+	if (override_port)
+		snprintf(req->port, sizeof(req->port), "%s", override_port);
 	req->id = next_id++;
 	req->submit_ms = fm160_now_ms();
 

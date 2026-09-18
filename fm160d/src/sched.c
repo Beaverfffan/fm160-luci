@@ -17,6 +17,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
@@ -140,26 +141,92 @@ static void item_arm(struct poll_item *it)
 /* port discovery                                                       */
 /* ------------------------------------------------------------------ */
 
-/*
- * Record /dev/<name> as an AT candidate.  A name that would not fit is dropped
- * rather than stored truncated: a cut-off device path is worse than a missing
- * one, because it survives discovery and only fails much later at open().
- */
-static void add_candidate(const char *name)
-{
-	int n = snprintf(g_state.cand[g_state.cand_count], FM160_PORT_MAX,
-			 "/dev/%s", name);
+/* Last candidate set we announced, so the rescan loop stays quiet. */
+static char scan_sig[256];
 
-	if (n < 0 || n >= FM160_PORT_MAX)
-		return;
-	g_state.cand_count++;
+/*
+ * Resolve (idVendor, bInterfaceNumber) of the USB node a /dev/<name> tty hangs
+ * off, in one upward walk.
+ *
+ * The sysfs chain is NOT uniform across drivers, which is what broke the old
+ * hard-coded "/sys/class/tty/%s/device/../idVendor":
+ *
+ *   usb-serial / option:  .../ttyUSB0/device -> the serial PORT device
+ *                                              (parent = usb_interface)
+ *   cdc_acm:              .../ttyACM0/device -> the usb_interface itself
+ *
+ * idVendor lives in the usb_device, one level ABOVE the interface, while
+ * bInterfaceNumber lives IN the interface.  On this hardware
+ * /sys/class/tty/ttyUSBn/device/.. resolves to the interface directory -- it
+ * has bInterfaceNumber but no idVendor -- so the old single-level read failed
+ * for all four ports.  Walk upwards instead of guessing a depth.
+ *
+ * Returns 0 when idVendor was found (written to out), -1 otherwise.  *iface is
+ * set to -1 when bInterfaceNumber could not be read.
+ */
+static int tty_usb_ids(const char *name, char *out, size_t outlen, int *iface)
+{
+	char link[256], dir[PATH_MAX];
+	int have_vid = 0, up;
+
+	*iface = -1;
+	if (snprintf(link, sizeof(link), "/sys/class/tty/%s/device", name)
+	    >= (int)sizeof(link))
+		return -1;
+	if (!realpath(link, dir))
+		return -1;
+
+	for (up = 0; up < 6; up++) {
+		char path[PATH_MAX], buf[64];
+		char *slash;
+
+		if (!have_vid &&
+		    snprintf(path, sizeof(path), "%s/idVendor", dir)
+		    < (int)sizeof(path) && read_sysfs(path, out, outlen) == 0)
+			have_vid = 1;
+		if (*iface < 0 &&
+		    snprintf(path, sizeof(path), "%s/bInterfaceNumber", dir)
+		    < (int)sizeof(path) && read_sysfs(path, buf, sizeof(buf)) == 0)
+			*iface = (int)strtol(buf, NULL, 16);  /* sysfs: %02x */
+		if (have_vid && *iface >= 0)
+			break;
+
+		slash = strrchr(dir, '/');
+		if (!slash || slash == dir)
+			break;
+		*slash = '\0';
+		if (!strcmp(dir, "/sys/devices") || !strcmp(dir, "/sys"))
+			break;
+	}
+	return have_vid ? 0 : -1;
 }
+
+/*
+ * Probe order within one scan.  The Fibocom serial layout is
+ * 0=DIAG 1=NMEA 2=AT 3=MODEM, and only iface 2 answers "AT".  Probing 0 and 1
+ * first costs two full 4 s timeouts before the daemon can find its port, so
+ * iface 2 goes first.  This is a HINT only -- the probe still has the final
+ * say, so a wrong guess costs one timeout and can never select a port that
+ * does not actually answer.
+ */
+enum cand_class {
+	CAND_FIBOCOM_AT = 0,   /* Fibocom, interface 2 */
+	CAND_FIBOCOM,          /* Fibocom, some other interface */
+	CAND_UNKNOWN,          /* idVendor unreadable: take it, but say so */
+	CAND_FOREIGN,          /* positively identified as another vendor */
+	CAND_CLASSES
+};
 
 static void fm160_scan_candidates(void)
 {
+	struct { char name[32]; int cls; int iface; } found[FM160_CAND_MAX];
 	DIR *d;
 	struct dirent *de;
-	char path[256], vid[64];
+	int nfound = 0, n_vid = 0, n_unknown = 0, n_foreign = 0;
+	int cls, i;
+	char sig[256] = "";
+	size_t off = 0;
+	bool changed;
 
 	g_state.cand_count = 0;
 	g_state.cand_idx = 0;
@@ -168,33 +235,105 @@ static void fm160_scan_candidates(void)
 	if (!d)
 		return;
 
-	while ((de = readdir(d)) != NULL && g_state.cand_count < FM160_CAND_MAX) {
+	while ((de = readdir(d)) != NULL && nfound < FM160_CAND_MAX) {
 		char *name = de->d_name;
+		char vid[64];
+		int iface, n;
 
 		if (strncmp(name, "ttyUSB", 6) && strncmp(name, "ttyACM", 6))
 			continue;
 
-		/* /sys/class/tty/ttyUSBn/device -> the USB interface; its parent
-		 * is the USB device which carries idVendor. */
-		if (snprintf(path, sizeof(path),
-			     "/sys/class/tty/%s/device/../idVendor",
-			     name) >= (int)sizeof(path))
-			continue;
+		n = snprintf(found[nfound].name, sizeof(found[nfound].name),
+			     "/dev/%s", name);
+		if (n < 0 || n >= (int)sizeof(found[nfound].name))
+			continue;   /* truncated path is worse than no path */
 
-		if (read_sysfs(path, vid, sizeof(vid)) != 0) {
-			/* layout differs (e.g. some CDC devices): accept anyway */
-			add_candidate(name);
+		if (tty_usb_ids(name, vid, sizeof(vid), &iface) != 0) {
+			/* Could not establish whose port this is.  Keep it: a
+			 * probe that fails is cheap and recoverable, whereas
+			 * dropping the real AT port means the daemon never
+			 * comes up at all.  But do NOT claim it is Fibocom --
+			 * that lie is what hid this bug for a whole cycle. */
+			found[nfound].cls = CAND_UNKNOWN;
+			n_unknown++;
+		} else if (strcasecmp(vid, FM160_VENDOR_ID)) {
+			n_foreign++;
 			continue;
+		} else {
+			found[nfound].cls = (iface == 2) ? CAND_FIBOCOM_AT
+							 : CAND_FIBOCOM;
+			n_vid++;
 		}
-		if (strcasecmp(vid, FM160_VENDOR_ID))
-			continue;
-		add_candidate(name);
+		found[nfound].iface = iface;
+		nfound++;
 	}
 	closedir(d);
 
-	if (g_state.cand_count)
-		fm160_log(LOG_INFO, "found %d Fibocom (%s:*) serial port(s)",
-			  g_state.cand_count, FM160_VENDOR_ID);
+	/* Emit in class order; the array is stable, so ports keep readdir order
+	 * inside a class. */
+	for (cls = 0; cls < CAND_CLASSES; cls++)
+		for (i = 0; i < nfound; i++) {
+			if (found[i].cls != cls)
+				continue;
+			snprintf(g_state.cand[g_state.cand_count],
+				 FM160_PORT_MAX, "%s", found[i].name);
+			g_state.cand_count++;
+		}
+
+	/* Only speak when the picture actually changed.  This function is called
+	 * once per failed sweep, and the old unconditional log made a 5 s rescan
+	 * loop look like the daemon was doing something. */
+	for (i = 0; i < g_state.cand_count; i++) {
+		int w = snprintf(sig + off, sizeof(sig) - off, "%s,",
+				 g_state.cand[i]);
+		if (w < 0 || (size_t)w >= sizeof(sig) - off)
+			break;
+		off += (size_t)w;
+	}
+	changed = strcmp(sig, scan_sig) != 0;
+	if (changed)
+		snprintf(scan_sig, sizeof(scan_sig), "%s", sig);
+
+	if (!changed)
+		return;
+
+	if (g_state.cand_count) {
+		char order[FM160_CAND_MAX * 24];
+		size_t o = 0;
+		int j;
+
+		/* Print g_state.cand[], not found[]: found[] is in readdir order,
+		 * while cand[] is the order the probes will actually go out in.
+		 * Printing the former made the log claim if3 was tried first when
+		 * the daemon had in fact gone straight to if2. */
+		order[0] = '\0';
+		for (i = 0; i < g_state.cand_count && o < sizeof(order); i++) {
+			int iface = -1, w;
+
+			for (j = 0; j < nfound; j++) {
+				if (!strcmp(found[j].name, g_state.cand[i])) {
+					iface = found[j].iface;
+					break;
+				}
+			}
+			w = snprintf(order + o, sizeof(order) - o, "%s%s(if%d)",
+				     i ? " " : "", g_state.cand[i], iface);
+			if (w < 0 || (size_t)w >= sizeof(order) - o)
+				break;
+			o += (size_t)w;
+		}
+
+		fm160_log(LOG_INFO,
+			  "AT candidates: %d Fibocom (%s:*), %d unclassified, "
+			  "%d foreign | probe order: %s",
+			  n_vid, FM160_VENDOR_ID, n_unknown, n_foreign, order);
+	} else if (n_foreign || n_unknown) {
+		fm160_log(LOG_INFO,
+			  "no AT candidate: %d foreign tty(s), %d unclassified",
+			  n_foreign, n_unknown);
+	} else {
+		fm160_log(LOG_INFO, "no serial port on /sys/class/tty");
+	}
 }
 
 static void probe_cb(struct at_req *req, enum at_status status,
@@ -233,6 +372,19 @@ static void port_discovery_tick(void)
 		if (fm160_now_ms() < g_state.port_next_probe_ms)
 			return;
 		if (g_state.cand_idx >= g_state.cand_count) {
+			/* Either we have never scanned (cand_count == 0), or we
+			 * just walked the whole list without an answer.  In the
+			 * latter case wait before starting over: a modem that is
+			 * absent (or still booting) must not be probed in a tight
+			 * loop, and re-scanning immediately also re-ran the
+			 * "found N ports" log on every single sweep. */
+			if (g_state.cand_count > 0) {
+				g_state.cand_count = 0;
+				g_state.cand_idx = 0;
+				g_state.port_next_probe_ms =
+					fm160_now_ms() + PORT_PROBE_GAP_MS;
+				return;
+			}
 			fm160_scan_candidates();
 			if (!g_state.cand_count) {
 				g_state.port_next_probe_ms =

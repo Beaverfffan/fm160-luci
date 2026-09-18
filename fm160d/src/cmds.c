@@ -518,6 +518,30 @@ static const char *first_value_line(const char *resp)
 		    !(len >= 5 && !strncmp(p, "ERROR", 5)) &&
 		    !(len >= 3 && !strncmp(p, "AT+", 3)) &&
 		    !(len >= 3 && !strncmp(p, "at+", 3))) {
+			/* Strip a leading "+PREFIX:" when the command puts one
+			 * there.  AT+CFSN answers `+CFSN: "FP62PE002F"` while
+			 * AT+CGMI answers a bare string, and without this the UI
+			 * showed the whole protocol line as the serial number --
+			 * observed on the board as sn = "+CFSN: \"FP62PE002F\"".
+			 * Applied generically rather than naming +CFSN, because
+			 * AT+ICCID/+CCID are the same shape. */
+			if (*p == '+') {
+				const char *c = p;
+
+				while (c < e && *c != ':')
+					c++;
+				if (c < e) {
+					p = c + 1;
+					while (p < e && (*p == ' ' || *p == '\t'))
+						p++;
+					len = (size_t)(e - p);
+				}
+			}
+			/* ...then the quotes a few commands wrap the value in. */
+			if (len >= 2 && *p == '"' && p[len - 1] == '"') {
+				p++;
+				len -= 2;
+			}
 			if (len >= FM160_STR_MAX)
 				len = FM160_STR_MAX - 1;
 			memcpy(buf, p, len);

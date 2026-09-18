@@ -25,6 +25,10 @@ struct ubus_context *g_ubus;
 static struct ubus_event_handler at_event_handler;
 static const char *log_name = "fm160d";
 static int log_level = LOG_INFO;
+/* UCI ships log_level '6'.  Without this flag a `-d` on the command line was
+ * silently overridden by the config file, so the most natural way to debug the
+ * daemon produced no DEBUG output at all -- which cost a full diagnose cycle. */
+static bool log_level_forced;
 
 /* ------------------------------------------------------------------ */
 /* logging                                                              */
@@ -117,7 +121,7 @@ void fm160_config_load(void)
 		}
 	}
 
-	if (!uci_get("log_level", v, sizeof(v))) {
+	if (!log_level_forced && !uci_get("log_level", v, sizeof(v))) {
 		n = atoi(v);
 		if (n >= LOG_ERR && n <= LOG_DEBUG)
 			log_level = n;
@@ -285,8 +289,10 @@ int main(int argc, char **argv)
 	int i;
 
 	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--debug"))
+		if (!strcmp(argv[i], "-d") || !strcmp(argv[i], "--debug")) {
 			log_level = LOG_DEBUG;
+			log_level_forced = true;
+		}
 		else if (!strcmp(argv[i], "-o") || !strcmp(argv[i], "--once"))
 			once = true;
 	}

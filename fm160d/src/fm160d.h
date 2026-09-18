@@ -66,6 +66,13 @@ struct at_req {
 	char end_flag[FM160_AT_END_MAX];
 	int timeout_ms;          /* sendat timeout, seconds internally */
 	bool silent;             /* do not advance the circuit breaker */
+	/* Which port this request goes out on.  Empty means "the port the daemon
+	 * has settled on", i.e. g_state.port.  A port probe fills it in instead:
+	 * the probe is the thing that DISCOVERS g_state.port, so it cannot be
+	 * routed by it.  Keep it here rather than reading g_state inside
+	 * atq_issue() -- that read is exactly what made the probe send on an
+	 * empty port and fail forever. */
+	char port[FM160_PORT_MAX];
 	at_done_cb cb;
 	void *arg;
 };

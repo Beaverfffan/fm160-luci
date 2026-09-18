@@ -353,3 +353,74 @@ AT+GTCELLLOCK=<mode>[,<rat>,<type>,<earfcn>[,<PCI>][,<scs>[,<nrband>]]]
 - `AT+CGDCONT?` 在 FM160 上会返回多条（cid 1 ip / cid 2 ims / cid 3 cmnet / cid 4 cmwap / cid 5 sos），**不要假设只有 1 条**。
 - `AT+CPIN?` 返回 `+CPIN: READY` 才算识别到 SIM；连续 90 s 查不到 ⇒ 官方建议复位模块。
 - `AT+CSQ` 的 `<rssi>` 必须 > 0 且 ≠ 99；连续 90 s 不正确 ⇒ 复位模块。
+
+---
+
+## 8. 真机实测（H69K + FM160-CN，89614.1000.00.04.01.02）
+
+以下全部来自设备实测；与手册不一致处，**以本节为准**。
+
+### 8.1 端口布局（VID:PID = `2cb7:0104`，`AT+GTUSBMODE?` = 32 = QMI 模式）
+
+`option` 驱动绑定 iface 0–3，`qmi_wwan` 绑定 iface 4：
+
+| 接口 | 设备 | 用途 | 能否应答 `AT` |
+|---|---|---|---|
+| 0 | `/dev/ttyUSB0` | DIAG | 否（超时） |
+| 1 | `/dev/ttyUSB1` | NMEA（GNSS 输出） | 否（超时） |
+| 2 | `/dev/ttyUSB2` | **AT 口** | **是，约 1 s 内** |
+| 3 | `/dev/ttyUSB3` | MODEM | 否 |
+| 4 | `wwan0` | QMI 数据面 | — |
+
+⇒ 探测顺序按 `bInterfaceNumber` 把 **iface 2 排最前**，省掉两次 4 s 超时。
+
+**sysfs 陷阱**：`/sys/class/tty/ttyUSBn/device` 解析到的是 **usb_interface**，
+所以 `<那>/../idVendor` **仍然是接口目录** —— 它只有 `bInterfaceNumber`，**没有 `idVendor`**。
+`idVendor` 在再上一层（usb_device）。⇒ 必须 `realpath()` 之后**逐级上溯**找，
+硬编码一级会让 VID 过滤全程静默失效。另：`bInterfaceNumber` 在 sysfs 里是 **`%02x` 十六进制**。
+
+### 8.2 ★ `+CME ERROR` 是终结符，且传输层把它报成 `success`
+
+at-daemon 的默认 end_flag 列表 = `OK` / `ERROR` / `+CME ERROR:` / `+CME ERROR:` / `NO CARRIER`。
+匹配到任一即 `result = 0` ⇒ 回报 `status: "success"`。
+
+**所以 `success` 的含义是「这次交互结束了」，不是「模块接受了命令」。**
+实测后果：无 SIM 时 `AT+ICCID` 回 `+CME ERROR: 13`，被当成成功，错误文本被存成了 ICCID。
+
+⇒ 判成功必须**先看响应文本**再看 status：含 `ERROR` 一律 `AT_STATUS_ERROR`，
+统一在 `atq.c` 的 `sendat_cb` 里做（那是所有 AT 的唯一收口）。
+`AT_STATUS_ERROR` 只记 `last_fail_ms`、**不累加熔断计数**（熔断只认 timeout），
+所以无 SIM 的常态 CME ERROR 不会把模块误判成故障。
+
+### 8.3 实测响应时间与取值形状
+
+| 命令 | 实测 | 备注 |
+|---|---|---|
+| `AT` | 首次 ~1 s（含开端口），之后 < 50 ms | 探测用 |
+| `AT+CSQ` | 24–40 ms | RSSI=25 → −63 dBm |
+| `AT+CGMI` | 快速 | `Fibocom Wireless Inc.`（**无**前缀） |
+| `AT+CGMM` | 快速 | `FM160-CN` |
+| `AT+CGMR` | 快速 | `89614.1000.00.04.01.02` |
+| `AT+CGSN` | 快速 | IMEI，纯数字无前缀 |
+| `AT+CFSN` | 快速 | ⚠️ 回 `+CFSN: "FP62PE002F"` —— **带前缀和引号**，必须剥 |
+| `AT+ICCID` | 18 ms | 无 SIM 时 `+CME ERROR: 13` |
+| `AT+GTUSBMODE?` | 16 ms | 本机 `32` |
+
+全链最差响应 **36 ms**，`queue_depth` 恒 0 —— 15 s / 10 s 的分层轮询对这块模块足够宽松。
+
+⇒ 取值统一处理：先剥开头的 `+PREFIX:`，再剥首尾引号
+（`cmds.c` 的 `first_value_line()`；`AT+CGMI` 那种裸串不受影响）。
+
+### 8.4 设备上的第三方争用（**直接伤害 AT 稳定性**）
+
+实测该设备（iStoreOS 24.10.8，刷过自制镜像）上同时存在：
+
+* **`ModemManager` 在跑**（`S70modemmanager`，pid 9115）—— 它会去开它找到的每个 ttyUSB。
+* **`S99adb-enablemodem` 在跑**，`adb wait-for-device` + `adb fork-server` 常驻。
+  该脚本只为 TP-LINK LTE 模块（`0x2357:0x000D`）写，对 FM160 永不匹配，等于白占一个 adb server。
+* `network.2_1` = `proto dhcp` on `wwan0`（qmodem 遗留命名），实测引发内核
+  `wwan0: NETDEV WATCHDOG: transmit queue 0 timed out 5170 ms`。
+* 另有 `qmi_wwan 2-1:1.4 wwan0: Cannot change a running device`。
+
+⇒ 「fm160d 是 AT 口唯一属主」这个设计前提，在**这台机器上并不成立**。
+动手前先确认没有别的进程会去开 `ttyUSB2`（`grep ttyUSB /proc/*/fd`）。
