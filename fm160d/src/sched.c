@@ -58,9 +58,12 @@ struct poll_item {
  *   AT+CIMI         5 221 ms   (no data, URC leak)
  *   AT+CGDCONT?     5 211 ms   (no data, URC leak)
  *
- * Identity (CGMI/CGMM/CGMR/CGSN/CFSN/ICCID) and the USB mode are read once per
- * boot by the ident sequence, never here.  Anything SIM- or SMS-related belongs
- * inside the quiet window behind an explicit user action.
+ * Identity (CGMI/CGMM/CGMR/CGSN/CFSN/ICCID), the USB mode and the M4 capability
+ * lists (AT+GTACT=? / AT+GTCELLLOCK=?) are read once per boot by the ident
+ * sequence, never here.  The capability lists in particular are the *permission*
+ * for the M4 write path, so they must not be something a poll loop can lose.
+ * Anything SIM- or SMS-related belongs inside the quiet window behind an
+ * explicit user action.
  *
  * For contrast, the commands that ARE polled, measured the same way:
  *   AT+CSQ 24 ms | AT+CREG?/AT+CGREG?/AT+CEREG? 26-36 ms | AT+GTCCINFO? 25 ms
@@ -73,6 +76,20 @@ static struct poll_item items[] = {
 	{ "signal", true,      0, 10000, 0, 0, 0, 0, fm160_cmd_poll_signal },
 	/* serving + neighbour cells (AT+GTCCINFO?, < 3 s on the modem) */
 	{ "cell",   true,      0, 10000, 0, 0, 0, 0, fm160_cmd_poll_cell   },
+	/* --- M4 -------------------------------------------------------- */
+	/* Persistent band restriction, 26 ms measured.  These two are the one
+	 * deliberate exception to "slow-changing commands stay out of the poll
+	 * loop": they are not merely informational, they are the *evidence* that
+	 * a restriction is in force.  An empty cache would let the UI say
+	 * "unrestricted" when the truth is "we have not looked", which is a
+	 * wrong answer rather than a missing one - so they are read at a very
+	 * long idle interval instead of never. */
+	{ "gtact",    false, 600000, 15000, 0, 0, 0, 0, fm160_cmd_poll_gtact    },
+	/* Cell lock state, 16 ms.  Also the gate for the mutual exclusion
+	 * between cell lock and band lock, so it is worth knowing at idle. */
+	{ "celllock", false, 600000, 15000, 0, 0, 0, 0, fm160_cmd_poll_celllock },
+	/* Carrier aggregation: only meaningful to a human reading the page. */
+	{ "ca",       true,      0, 15000, 0, 0, 0, 0, fm160_cmd_poll_ca       },
 	{ NULL, false, 0, 0, 0, 0, 0, 0, NULL },
 };
 

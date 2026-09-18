@@ -19,6 +19,19 @@ var callIdent    = rpc.declare({ object: 'fm160', method: 'ident',    expect: {}
 var callEnabled  = rpc.declare({ object: 'fm160', method: 'enabled',  params: [ 'enabled' ], expect: {} });
 
 /*
+ * M4 write paths.  Both are deferred on the daemon side: the answer only
+ * arrives after the write AND a read-back of the same setting have both
+ * completed, so the reply means "the modem agrees it is now set to this",
+ * not merely "the command was sent".  Do not shorten the caller-side patience
+ * for these two - the daemon holds them for up to ~10 s per step.
+ */
+var callSetBands    = rpc.declare({ object: 'fm160', method: 'setbands',
+				    params: [ 'bands' ], expect: {} });
+var callSetCellLock = rpc.declare({ object: 'fm160', method: 'setcelllock',
+				    params: [ 'mode', 'rat', 'type', 'earfcn', 'pci',
+					      'scs', 'nrband' ], expect: {} });
+
+/*
  * USB profiles.
  *
  * The dial-up document carries FOUR port tables, one per platform, and the same
@@ -441,6 +454,156 @@ function atHealth(state) {
 	return { level: 'ok', text: _('AT healthy') };
 }
 
+/*
+ * --- M4: band lock / cell lock / carrier aggregation -----------------
+ *
+ * Everything below reads the "m4" sub-table of the snapshot.  Two rules run
+ * through all of it:
+ *
+ *   caps.valid   The capability enumerations (AT+GTACT=?, AT+GTCELLLOCK=?)
+ *                are the LICENCE to write.  Without them the daemon refuses
+ *                the write outright, so a view must disable the control
+ *                rather than let the user produce a command that will be
+ *                rejected.  Both settings are persistent, so a guess is not
+ *                a harmless one.
+ *
+ *   has_*        The cell-lock trailing fields are optional and the daemon
+ *                collapses "absent" to 0 in state while keeping has_pci /
+ *                has_scs / has_nrband.  Never render pci without checking
+ *                has_pci: 0 is a legal PCI.
+ */
+
+function m4Of(st)          { return (st && st.m4) || {}; }
+function bandsOf(st)       { return m4Of(st).bands || {}; }
+function bandCapsOf(st)    { return m4Of(st).band_caps || {}; }
+function celllockOf(st)    { return m4Of(st).celllock || {}; }
+function celllockCapsOf(st){ return m4Of(st).celllock_caps || {}; }
+function caOf(st)          { return m4Of(st).ca || {}; }
+
+/* The RAT-prefixed band token.  AT+GTACT writes the raw token, not the band
+ * number, so the raw string is what a "lock to the serving band" button has
+ * to send: 3 is ambiguous, 103 is not. */
+function bandRaw(b) { return (b && b.raw) || 0; }
+
+/* Decoded band number, or null when fm160d could not map the token.  A
+ * non-zero unknown count in the snapshot is the signal that a firmware changed
+ * its encoding, and the right response is to show the raw token, not a guess. */
+function bandNo(b) {
+	return (b && b.band > 0) ? b.band : null;
+}
+
+function bandLabel(b) {
+	if (!b)
+		return '-';
+	var n = bandNo(b);
+
+	if (n === null)
+		return _('raw') + ' ' + bandRaw(b);
+	if (b.rat === 9)
+		return 'n' + n;
+	return 'B' + n;
+}
+
+/* A band entry is only useful for locking if the decoder recognised it. */
+function bandUsable(b) { return !!(b && b.raw > 0 && b.band > 0); }
+
+/* Flatten the per-RAT arrays the daemon publishes into one list, keeping the
+ * RAT on each entry. */
+function bandListOf(g) {
+	var out = [];
+
+	if (!g)
+		return out;
+
+	[ 'umts', 'lte', 'nr' ].forEach(function(k) {
+		(g[k] || []).forEach(function(b) {
+			out.push({ raw: b.raw, band: b.band, rat: b.rat, kind: k });
+		});
+	});
+	return out;
+}
+
+/* A comma-separated AT+GTACT band list built from entries, deduplicated but
+ * otherwise in the order given (the modem does not care about order). */
+function bandCsv(entries) {
+	var seen = {}, out = [];
+
+	(entries || []).forEach(function(b) {
+		var raw = bandRaw(b);
+
+		if (!raw || seen[raw])
+			return;
+		seen[raw] = true;
+		out.push(String(raw));
+	});
+	return out.join(',');
+}
+
+/* Which of the three lockable RATs a band belongs to, as the <rat> value
+ * AT+GTCELLLOCK wants: 0 LTE, 1 NR, 2 UMTS. */
+function celllockRatOf(band_rat) {
+	if (band_rat === 9)
+		return 1;
+	if (band_rat === 2)
+		return 2;
+	return 0;
+}
+
+var CELLLOCK_RAT_TEXT = { 0: 'LTE', 1: 'NR', 2: 'UMTS' };
+
+function celllockRatName(rat) { return CELLLOCK_RAT_TEXT[rat] || ('RAT ' + rat); }
+
+/* 'lock PCI' vs 'lock frequency' - <type>. */
+var CELLLOCK_TYPE_TEXT = { 0: _('by PCI'), 1: _('by frequency') };
+
+function celllockTypeName(t) { return CELLLOCK_TYPE_TEXT[t] || ('type ' + t); }
+
+function celllockEarfcn(l) {
+	/* earfcn travels as u64 and 0 is a legal value, so it is shown whenever
+	 * the lock is on rather than filtered through reported(). */
+	return (l && l.earfcn) ? l.earfcn : null;
+}
+
+function celllockPci(l) {
+	return (l && l.has_pci && reported(l.pci)) ? l.pci : null;
+}
+
+function celllockNrband(l) {
+	return (l && l.has_nrband && reported(l.nrband)) ? l.nrband : null;
+}
+
+function celllockScs(l) {
+	return (l && l.has_scs && reported(l.scs)) ? l.scs : null;
+}
+
+/* The value AT+GTCELLLOCK=? advertised beyond what the manual defines.  Shown
+ * as a note, never offered as a choice. */
+function celllockModeUndocumented(st) {
+	return !!celllockCapsOf(st).mode_undocumented;
+}
+
+/* SCC modulation arrives as the raw code; 6 means "no data". */
+var CA_MOD_TEXT = {
+	0: 'BPSK', 1: 'QPSK', 2: '16QAM', 3: '64QAM', 4: '256QAM', 5: '1024QAM'
+};
+
+function caModName(code) {
+	return (code === undefined || code === null) ? '-' : (CA_MOD_TEXT[code] || _('unknown'));
+}
+
+function caStateName(s) {
+	return s === 2 ? _('activated') : (s === 1 ? _('configured') : '-');
+}
+
+/* Highest MCS a cell reports, for a one-line summary. */
+function caCellSummary(c) {
+	if (!c)
+		return '-';
+	return fmtBand(c.band) + ' / ' + (c.dl_bw_mhz ? c.dl_bw_mhz + ' MHz' : '-') +
+	       ' / ' + (c.dl_mimo ? c.dl_mimo + 'x' + c.dl_mimo : '-') +
+	       ' / ' + caModName(c.dl_mod);
+}
+
 return baseclass.extend({
 	USB_MODES: USB_MODES,
 	USB_PLATFORM: USB_PLATFORM,
@@ -458,6 +621,8 @@ return baseclass.extend({
 	rescan: callRescan,
 	ident: callIdent,
 	setEnabled: callEnabled,
+	setBands: callSetBands,
+	setCellLock: callSetCellLock,
 
 	ratName: ratName,
 	regName: regName,
@@ -503,6 +668,31 @@ return baseclass.extend({
 	fmtRate: fmtRate,
 	fmtAge: fmtAge,
 	atHealth: atHealth,
+
+	/* --- M4 -------------------------------------------------------- */
+	m4Of: m4Of,
+	bandsOf: bandsOf,
+	bandCapsOf: bandCapsOf,
+	celllockOf: celllockOf,
+	celllockCapsOf: celllockCapsOf,
+	caOf: caOf,
+	bandRaw: bandRaw,
+	bandNo: bandNo,
+	bandLabel: bandLabel,
+	bandUsable: bandUsable,
+	bandListOf: bandListOf,
+	bandCsv: bandCsv,
+	celllockRatOf: celllockRatOf,
+	celllockRatName: celllockRatName,
+	celllockTypeName: celllockTypeName,
+	celllockEarfcn: celllockEarfcn,
+	celllockPci: celllockPci,
+	celllockNrband: celllockNrband,
+	celllockScs: celllockScs,
+	celllockModeUndocumented: celllockModeUndocumented,
+	caModName: caModName,
+	caStateName: caStateName,
+	caCellSummary: caCellSummary,
 
 	/*
 	 * Modes that may be offered for a given dial kind.

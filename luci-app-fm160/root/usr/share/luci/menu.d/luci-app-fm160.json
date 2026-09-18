@@ -25,6 +25,14 @@
 			"path": "fm160/signal"
 		}
 	},
+	"admin/fm160/cells": {
+		"title": "小区与锁频",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "fm160/cells"
+		}
+	},
 	"admin/fm160/debug": {
 		"title": "AT 调试",
 		"order": 90,

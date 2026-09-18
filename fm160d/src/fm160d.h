@@ -28,6 +28,11 @@
 #define FM160_VENDOR_ID     "2cb7"   /* Fibocom */
 #define FM160_PORT_MAX      64
 #define FM160_STR_MAX       96
+/* One response line.  FM160_STR_MAX is fine for scalar answers but AT+GTACT=?
+ * answers with a single ~131-character line of nine groups, and
+ * fm160_resp_find() truncates silently at outlen-1 - so the M4 parsers ask for
+ * a buffer that fits the longest documented enumeration. */
+#define FM160_RESP_LINE_MAX 512
 #define FM160_AT_CMD_MAX    256
 #define FM160_AT_END_MAX    32
 #define FM160_RAW_MAX       8192
@@ -129,6 +134,139 @@ struct fm160_cell {
 	int  rxlev_raw;
 };
 
+/* ------------------------------------------------------------------ */
+/* M4: band lock / cell lock / carrier aggregation                      */
+/* ------------------------------------------------------------------ */
+
+#define FM160_BAND_MAX   32   /* entries per RAT, both state and caps   */
+#define FM160_CAP_INT_MAX 24  /* integers in one AT+GTACT=? group       */
+#define FM160_CA_MAX      8   /* secondary cells we keep                */
+
+/* M4 write path guardrails. */
+#define FM160_GTACT_GROUPS  9  /* rat,pref1,pref2,gsm,umts,lte,cdma,evdo,nr */
+
+/*
+ * One band as it appears in AT+GTACT / AT+GTACT=? output.
+ *
+ * Both commands use a RAT-prefixed encoding rather than a uniform offset:
+ * UMTS = band number (1..25), LTE = 100 + band (101..164), NR = 500 + band for
+ * one/three-digit bands but 5000 + band and 50000 + band for the two- and
+ * three-digit ones (5010 = n10, 50100 = n100).  The raw token is kept next to
+ * the decoded band because the *raw* form is what has to be written back.
+ */
+struct fm160_band {
+	int raw;
+	int band;      /* decoded band number, 0 when undecodable */
+	int rat;       /* 2 UMTS, 4 LTE, 9 NR */
+};
+
+/* AT+GTACT? - what the modem is currently restricted to. */
+struct fm160_gtact_state {
+	bool valid;
+	int  rat, pref1, pref2;        /* leading scalars, same as AT+GTRAT? */
+	struct fm160_band umts[FM160_BAND_MAX]; int umts_n;
+	struct fm160_band lte[FM160_BAND_MAX];  int lte_n;
+	struct fm160_band nr[FM160_BAND_MAX];   int nr_n;
+	/* Tokens that fit no documented encoding.  Counted rather than guessed,
+	 * so an unexpected firmware can be spotted instead of silently dropped. */
+	int  unknown_n;
+	/* A band value of 0 means "automatic band selection" - i.e. unrestricted
+	 * for that RAT.  It is a marker, not a band. */
+	bool auto_seen;
+	uint64_t last_ok_ms;
+};
+
+/*
+ * AT+GTACT=? - what the modem says it supports.  Nine groups in a fixed order.
+ *
+ * Never assume these exist: on FM160-CN the gsm, cdma and evdo groups come
+ * back as "( )", i.e. empty.  group_nonempty[] records which ones the modem
+ * actually filled in, so the UI can grey out what does not apply instead of
+ * offering the manual's generic list.
+ */
+struct fm160_gtact_caps {
+	bool valid;
+	int  rat[FM160_CAP_INT_MAX];   int rat_n;
+	int  pref1[FM160_CAP_INT_MAX]; int pref1_n;
+	int  pref2[FM160_CAP_INT_MAX]; int pref2_n;
+	struct fm160_band umts[FM160_BAND_MAX]; int umts_n;
+	struct fm160_band lte[FM160_BAND_MAX];  int lte_n;
+	struct fm160_band nr[FM160_BAND_MAX];   int nr_n;
+	bool group_nonempty[FM160_GTACT_GROUPS];
+	uint64_t last_ok_ms;
+};
+
+/*
+ * AT+GTCELLLOCK? - persistent cell lock state.
+ *
+ * ⚠️ Persistent = Yes and it only takes effect after a UE reset, because the
+ * value is written to an EFS file.  fm160d therefore never reboots the module
+ * on its own: it applies the AT write and tells the user what remains to do.
+ */
+struct fm160_celllock_state {
+	bool valid;
+	bool enabled;                /* mode field: 0 disabled, 1 enabled */
+	int  rat;                    /* 0 LTE, 1 NR, 2 UMTS   */
+	int  type;                   /* 0 lock PCI/PSC, 1 lock frequency */
+	unsigned long long earfcn;
+	int  pci;
+	int  scs;                    /* 0 = 15 kHz, 1 = 30 kHz */
+	int  nrband;                 /* 501 + n form */
+	bool has_pci, has_scs, has_nrband;   /* trailing fields are optional */
+	uint64_t last_ok_ms;
+};
+
+/*
+ * AT+GTCELLLOCK=? - the modem answers ranges, not enumerations, for the
+ * numeric fields, so this is stored as bounds.
+ *
+ * ⚠️ The live modem reports mode list "(0,1,2)" while the manual only defines
+ * 0 and 1.  mode 2 is undocumented, so fm160d only ever writes 0 or 1 and
+ * records the third value here purely as evidence.
+ */
+struct fm160_celllock_caps {
+	bool valid;
+	int  mode[8];   int mode_n;
+	int  rat_min, rat_max;
+	int  type[4];   int type_n;
+	unsigned int earfcn_max;
+	int  pci_max;
+	int  scs_min, scs_max;
+	int  nrband_min, nrband_max;
+	uint64_t last_ok_ms;
+};
+
+/*
+ * AT+GTCAINFO? - carrier aggregation.
+ *
+ * Returns a bare "OK" with no data line when the modem is not aggregated
+ * (measured with no SIM), so "parsed nothing" is a normal state and must not
+ * be reported as a parse error.
+ */
+struct fm160_ca_cell {
+	bool valid;
+	bool is_pcc;
+	int  state;            /* 1 configured+deactivated, 2 activated */
+	int  ul_configured;
+	int  band;
+	int  pci;
+	unsigned long long freq;    /* earfcn (LTE) or narfcn (NR) */
+	int  dl_bw_mhz, ul_bw_mhz;
+	int  dl_mimo, ul_mimo;
+	int  dl_mod, ul_mod;        /* 0 BPSK .. 5 1024QAM, 6 unknown */
+	int  rsrp_dbm;
+};
+
+struct fm160_ca_state {
+	bool valid;            /* a PCC row was parsed */
+	int  rat;              /* 4 LTE, 9 NR -- the first (headline) block */
+	bool has_nr;           /* an NR block was present (EN-DC) */
+	struct fm160_ca_cell pcc;
+	struct fm160_ca_cell scc[FM160_CA_MAX];
+	int  scc_n;
+	uint64_t last_ok_ms;
+};
+
 struct fm160_state {
 	/* port */
 	char port[FM160_PORT_MAX];
@@ -186,6 +324,13 @@ struct fm160_state {
 	int  neigh_count;
 	uint64_t cell_last_ok_ms;
 
+	/* M4: band lock / cell lock / carrier aggregation */
+	struct fm160_gtact_state    gtact;
+	struct fm160_gtact_caps     gtact_caps;
+	struct fm160_celllock_state celllock;
+	struct fm160_celllock_caps  celllock_caps;
+	struct fm160_ca_state       ca;
+
 	/* netdev counters (read from sysfs, costs zero AT) */
 	char netdev[32];
 	uint64_t rx_bytes, tx_bytes;
@@ -221,6 +366,11 @@ enum {
 	QUIET_DIAL,
 	QUIET_COPS,
 	QUIET_GNSS,
+	/* M4.  The manual forbids combining GTACT/GTRAT/COPS/GTCELLLOCK, and both
+	 * of these are persistent writes, so they get their own reason and their
+	 * own quiet window rather than sharing QUIET_MANUAL. */
+	QUIET_BANDS,
+	QUIET_CELLLOCK,
 };
 
 extern struct fm160_state g_state;
@@ -302,6 +452,22 @@ void fm160_ident_reset(void);
 void fm160_cmd_poll_reg(void);
 void fm160_cmd_poll_signal(void);
 void fm160_cmd_poll_cell(void);
+/* M4 polls: all three are cache refreshers for the snapshot. */
+void fm160_cmd_poll_gtact(void);
+void fm160_cmd_poll_celllock(void);
+void fm160_cmd_poll_ca(void);
+
+/* M4 write paths.  Both refuse to run when the capability enumeration failed,
+ * both read the value back before reporting success, and neither ever resets
+ * the module.  cb receives AT_STATUS_OK only after the read-back agrees. */
+int  fm160_cmd_set_bands(const char *bands_csv, at_done_cb cb, void *arg);
+int  fm160_cmd_set_celllock(int mode, int rat, int type, unsigned long long earfcn,
+			    int pci, int scs, int nrband, at_done_cb cb, void *arg);
+/* The command string the write path would send - exposed so the UI can show it
+ * and so it can be checked without touching the modem. */
+int  fm160_bands_command(char *out, size_t outlen, const char *bands_csv);
+int  fm160_celllock_command(char *out, size_t outlen, int mode, int rat, int type,
+			    unsigned long long earfcn, int pci, int scs, int nrband);
 
 /* Parsers (also used by the AT debug page / tests). */
 void fm160_parse_csq(const char *resp);
@@ -309,6 +475,15 @@ void fm160_parse_cesq(const char *resp);
 void fm160_parse_greg(const char *resp, const char *prefix, int *slot);
 void fm160_parse_ccinfo(const char *resp);
 void fm160_parse_usbmode(const char *resp);
+void fm160_parse_gtact(const char *resp);
+void fm160_parse_gtact_caps(const char *resp);
+void fm160_parse_celllock(const char *resp);
+void fm160_parse_celllock_caps(const char *resp);
+void fm160_parse_cainfo(const char *resp);
+
+/* Band encoding shared by the parsers and the write path. */
+int  fm160_band_decode(int rat, int raw);
+int  fm160_band_rat_of(int raw);
 
 /* ------------------------------------------------------------------ */
 /* ubus_methods.c                                                       */

@@ -32,8 +32,9 @@ endef
 
 define Package/luci-app-fm160/description
  LuCI JavaScript interface for a single Fibocom FM160 module: module status,
- signal and cell information, and an AT console.  Dialing, SMS, band/cell
- locking and GNSS pages are added by the following milestones.
+ signal and cell information, band/cell locking with the carrier-aggregation
+ view, and an AT console.  Dialing, SMS and GNSS pages are added by the
+ following milestones.
 endef
 
 define Build/Prepare

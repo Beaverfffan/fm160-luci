@@ -170,8 +170,12 @@ return view.extend({
 			this.tables.appendChild(E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Neighbour cells')),
 				E('table', { 'class': 'table' }, rows),
-				E('p', { 'class': 'hint' },
-				  _('Locking the modem to one of these cells is part of the band/cell locking page.'))
+				E('p', { 'class': 'hint' }, [
+					_('Band locking, cell locking and carrier aggregation live on the'), ' ',
+					E('a', { 'href': L.url('admin/fm160/cells') }, _('cells and locking')),
+					' ',
+					_('page.')
+				])
 			]));
 		}
 	},

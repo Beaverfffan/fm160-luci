@@ -530,3 +530,153 @@ AT port is /dev/ttyUSB2          <- 启动后 1 秒内命中首个候选
 
 复现脚本：`_probe/10-at-facts.sh`（已用正确单位；**故意跳过 ttyUSB2**，
 因为那是 `fm160d` 正在轮询的口）。`_probe/09-tty-truth.sh` 只做只读取证，不发任何 AT。
+
+## 9. M4 真机事实（锁频 / 锁小区 / CA，2026-09-18 验收）
+
+本节每一条都来自真机（H69K + FM160-CN，无 SIM，`/dev/ttyUSB2`），
+且**只发 `?` 与 `=?`**：`AT+GTACT=` 与 `AT+GTCELLLOCK=` 都是
+**Persistent = Yes**，会写进模组自己的 EFS，所以到本节为止从未在真机上执行过。
+
+### 9.1 四条原始响应（逐字）
+
+```
+AT+GTACT?
++GTACT: 20,6,3,1,8,101,103,105,108,134,138,139,140,141,501,5028,5041,5078,5079
+
+AT+GTACT=?
++GTACT: (1,2,4,10,14,16,17,20),(2,3,6),(2,3,6),( ),(1,8),
+        (101,103,105,108,134,138,139,140,141),( ),( ),(501,5028,5041,5078,5079)
+
+AT+GTCELLLOCK?
++GTCELLLOCK: 0
+
+AT+GTCELLLOCK=?
++GTCELLLOCK: (0,1,2),(0-2),(0,1),(0-4294967295),(0-1007),(0-1),(501-50261)
+
+AT+GTCAINFO?
+OK
+```
+
+### 9.2 ★ 判据：`AT+GTACT?` 的前三个字段**不是频段**
+
+19 个 token 里前 3 个是 `rat,pref1,pref2`（与 `AT+GTRAT?` 的 `20,6,3` 完全一致），
+后面 16 个才是频段 —— 而 fm160d 读出 `rat=20 pref=6,3 bands umts=2 lte=9 nr=5`
+（2+9+5 = 16 ✓）。若把 19 个都当频段，UMTS 会凭空多出 `20,6,3` 三个不存在的段。
+
+**频段是「一条扁平混合列表」，没有分隔**，只能靠编码自身反推 RAT：
+
+| 编码区间 | RAT | 例子 |
+|---|---|---|
+| `1..25` | UMTS（band = raw） | `1`→U1、`8`→U8 |
+| `101..499` | LTE（band = raw − 100） | `141`→B41 |
+| `501..509` / `5010..5099` / `50100..50999` | NR（−500 / −5000 / −50000） | `501`→n1、`5028`→n28、`5078`→n78 |
+
+真机解码结果与 `=?` 自述**互相印证**：state 的 UMTS 集合 `{1,8}` 恰好等于
+caps 的 UMTS 组 `(1,8)`。⇒ 解析器错一位就会立刻与 caps 矛盾，这是可用的自检。
+
+### 9.3 ★ `AT+GTACT=?` 只回**受限频段表**，且 gsm/cdma/evdo **是空组**
+
+九组顺序固定：`rat,pref1,pref2,gsm,umts,lte,cdma,evdo,nr`。
+真机 LTE 只报 9 个（`101,103,105,108,134,138,139,140,141`），NR 只报 5 个
+（`501,5028,5041,5078,5079`），而手册给的是全集 —— **手册的表不能当真机能力用**。
+`gsm`/`cdma`/`evdo` 三组是 `( )`（括号内只有一个空格）。
+
+⇒ `fm160d` 把每组的「是否非空」单独发布（`group_nonempty`，真机
+`[true,true,true,false,true,true,false,false,true]`），UI 灰掉而不是照抄手册。
+
+### 9.4 ★★ `AT+GTCELLLOCK=?` 报 `(0,1,2)`，而手册只定义 0 / 1
+
+```
+GTCELLLOCK caps: mode=3 (includes an undocumented value!) rat=0-2 type=2
+                 earfcn_max=4294967295 pci<=1007 scs=0-1 nrband=501-50261
+```
+
+mode 2 是**未文档化值**。「设备支持」和「我们可以写」是两个问题：
+`fm160_celllock_command()` 只接受 0/1，mode 2 只作为证据记录在
+`celllock_caps.mode_undocumented` 里，UI 明说「记录但永不使用」。
+同理 `earfcn` 上限是 `0-4294967295`，但 `nrband` 只到 `50261`，
+与手册写的 `50512` **不一致** —— 以真机为准，范围校验用 `=?` 报的值。
+
+### 9.5 ★★ `AT+GTCAINFO?` 无 CA 时回**裸 `OK`**（没有 `+GTCAINFO:` 头）
+
+无 SIM / 无数据连接时就是这样。⇒「解析不到」是**正常态**，
+必须清空状态而不是报错；否则 UI 会继续展示去注册之前的陈旧 CA 表。
+`m4.ca.valid=false` + 空 `scc[]` 就是我们发布的这种状态。
+
+### 9.6 ★ `GTCAINFO` 的 `<freq>` 是十进制，`GTCCINFO` 的同名列 `<earfcn>` 是十六进制
+
+手册给 GTCCINFO 的范围带 `0x`（`0-0xFFFFFFF`），给 GTCAINFO 的 `0-65535` / `0-2229167`
+**不带** —— 同一列两种进制。`ca_parse_row()` 按十进制解，`fm160_parse_celllock()`
+对 `earfcn` 走 `strtoull(..., NULL, 0)`（认 `0x` 前缀）。
+
+### 9.7 ★★★ blobmsg 把 u32 当**有符号** int32 输出 ⇒ `4294967295` 变成 `-1`
+
+`blobmsg_add_u32()` 存的是 `BLOBMSG_TYPE_INT32`，`blobmsg_format_json()` 用
+`%d` 打印 `(int32_t)`。真机实测：
+
+```
+"earfcn_max": -1          <-- 实际是 4294967295，cell lock 的 earfcn 上限
+```
+
+三个后果，全部要处理：
+
+1. 凡可能 > `INT32_MAX` 的字段**必须用 `blobmsg_add_u64()`**。
+   已改：`celllock_caps.earfcn_max`。
+2. `age_ms` 这类**时长**也是无符号的，同样改 u64（否则开机 24.8 天后变负数）。
+3. 前端 `api.js` 的 `reported()` 用**量级**判「未上报」（daemon 的 `NONE` 哨兵
+   `-1000000` 经 uint32 变成 `4293967296`，见 §8 旧账）。但 `-1` 的量级很小，
+   `reported(-1)` 会**通过** —— 所以 `has_pci` / `has_scs` / `has_nrband`
+   必须和值分开判断，不能靠量级。
+
+**判据（可复现）**：`ubus call fm160 status | sed -n '/celllock_caps/,/}/p'`，
+`earfcn_max` 必须是 `4294967295`，不是 `-1`。
+
+### 9.8 ★★★ `blobmsg_open_table()` 的句柄**不是** `blob_buf` —— 这是本轮 139 的根因
+
+`blobmsg_open_table(&b, name)` 返回一个**句柄**，它唯一的用途是交回
+`blobmsg_close_table(&b, handle)`；**往里写数据仍然用 `&b`**，因为 libubox 在
+`struct blob_buf` 里跟踪当前 head。
+
+把句柄当 `blob_buf` 用（`blobmsg_add_u32(&t, ...)`）**能编译通过、零警告**，
+然后在运行期把 `void *` 当 `blob_buf` 解引用。真机现象：
+
+```
+procd: Instance fm160d::instance1 s in a crash loop 6 crashes, 1 seconds since last crash
+ubus call service list '{"name":"fm160d"}'   ->   "exit_code": 139
+```
+
+崩溃点固定在**身份链走完那一刻**：`ident_next()` 末尾 `fm160_state_publish()`
+→ `fm160_state_blob()` → M4 段第一句。⇒ 与 AT 无关、与端口无关，
+纯粹是发布路径。修复：M4 段 75 处调用全部改回 `&b`（句柄只用于 close），
+并在 `state.c` 该段开头写明这条约定。
+
+### 9.9 M4 的测试手段（都可复现）
+
+| 手段 | 脚本 | 覆盖什么 |
+|---|---|---|
+| 宿主侧命令构造器单测 | `_tools/istoreos-h69k/19-m4-builder-test.sh` | **从 `cmds.c` 按名+花括号匹配抽取**两个构造器**原样**编译（不复制，故不会与实现漂移），31+ 例：`AT+GTACT=,,,103,5078` 形状、`103,,5`/`,103`/`103,`/`10 3`/`103\n`/`+103`/超长全部拒绝、mode 2/3/−1 拒绝、`pci < 0` 整段省略（不能填 0，0 是合法 PCI）、`scs`/`nrband` 各自可缺、`earfcn=4294967295` 通过 |
+| 真机只读验收 | `_tools/istoreos-h69k/15-verify-device.sh` 第 9 节 | caps 是否枚举成功（=写路径的许可）、九组顺序、未文档化 mode 的记录、`earfcn_max` 是否穿过 wire、**日志里绝不能出现 `band lock write` / `cell lock write`** |
+| 前端冒烟 | `_tmp/jscheck/m4check.js` | `api.js` 的 M4 访问器（哨兵两种编码、`has_*`、`bandCsv` 去重与顺序、`setcelllock` 的 7 个参数名与 daemon 的 blobmsg policy 逐字对应） |
+
+`19-m4-builder-test.sh` 的一个副作用值得记：真机模式下 `earfcn` 可以到
+`4294967295`，所以单测里必须有这条用例 —— 否则 `unsigned long long` 换成 `int`
+这种改动不会被任何编译警告发现。
+
+### 9.10 部署安全性（为什么 M4 可以先部署再用）
+
+M4 新增的全部后台动作都是**读**：`AT+GTACT?`（idle 600 s / 前台 15 s）、
+`AT+GTCELLLOCK?`（同）、`AT+GTCAINFO?`（**仅前台**），加上开机身份链末尾的
+两条 `=?`。两个写方法（`setbands` / `setcelllock`）**只能由显式 ubus 调用触发**，
+且各有一道闸：caps 未枚举成功 → 直接拒绝；`m4_writing` 串行锁（手册禁止
+GTACT/GTRAT/COPS/GTCELLLOCK 混用）；写后回读，只有回读结果被当作新状态；
+**永不重启 UE**。所以「先部署、只观察」是安全的，第 9 节也据此断言日志里
+没有任何写记录。
+
+### 9.11 已知遗留
+
+* `AT+GTACT?` 里 `auto_seen`（频段值为 `0` = 自动选频）真机**未出现** ——
+  说明当前模组是被显式限段的。`0` 的语义按手册实现，未实测。
+* 两个写路径**未在真机写入**。cell lock 需要 UE 复位才生效，而 FM160 没有
+  传统复位模式，故写入动作留给用户显式决定。
+* `AT+GTCAINFO?` 的**非空**形状（PCC/SCC 多行）尚未实测（无 SIM、无数据连接）。
+  解析器按手册 + `_probe/out-05.json` 的存档实现，`ca.valid` 为假时不展示。

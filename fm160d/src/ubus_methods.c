@@ -47,6 +47,40 @@ static const struct blobmsg_policy enabled_policy[] = {
 	[ATTR_ENABLED] = { .name = "enabled", .type = BLOBMSG_TYPE_BOOL },
 };
 
+/* --- M4 ------------------------------------------------------------- */
+
+enum {
+	ATTR_BANDS,
+	__ATTR_BANDS_MAX
+};
+
+static const struct blobmsg_policy bands_policy[] = {
+	[ATTR_BANDS] = { .name = "bands", .type = BLOBMSG_TYPE_STRING },
+};
+
+enum {
+	ATTR_MODE,
+	ATTR_RAT,
+	ATTR_TYPE,
+	ATTR_EARFCN,
+	ATTR_PCI,
+	ATTR_SCS,
+	ATTR_NRBAND,
+	__ATTR_CELLLOCK_MAX
+};
+
+static const struct blobmsg_policy celllock_policy[] = {
+	[ATTR_MODE]   = { .name = "mode",   .type = BLOBMSG_TYPE_INT32  },
+	[ATTR_RAT]    = { .name = "rat",    .type = BLOBMSG_TYPE_INT32  },
+	[ATTR_TYPE]   = { .name = "type",   .type = BLOBMSG_TYPE_INT32  },
+	/* earfcn reaches 4294967295 in the capability range, so it cannot
+	 * travel as an int32 without wrapping. */
+	[ATTR_EARFCN] = { .name = "earfcn", .type = BLOBMSG_TYPE_INT64  },
+	[ATTR_PCI]    = { .name = "pci",    .type = BLOBMSG_TYPE_INT32  },
+	[ATTR_SCS]    = { .name = "scs",    .type = BLOBMSG_TYPE_INT32  },
+	[ATTR_NRBAND] = { .name = "nrband", .type = BLOBMSG_TYPE_INT32  },
+};
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                              */
 /* ------------------------------------------------------------------ */
@@ -74,25 +108,27 @@ struct pending_at {
 	struct ubus_request_data req;
 };
 
-static void manual_at_cb(struct at_req *r, enum at_status status,
-			 const char *response, void *arg)
+static const char *at_status_name(enum at_status status)
 {
-	struct pending_at *p = arg;
-	struct blob_buf b = {};
-	const char *name;
-
 	switch (status) {
-	case AT_STATUS_OK:      name = "ok";      break;
-	case AT_STATUS_ERROR:   name = "error";   break;
-	case AT_STATUS_TIMEOUT: name = "timeout"; break;
-	case AT_STATUS_NOPORT:  name = "no_port"; break;
-	case AT_STATUS_BUSY:    name = "busy";    break;
-	default:                name = "unknown"; break;
+	case AT_STATUS_OK:      return "ok";
+	case AT_STATUS_ERROR:   return "error";
+	case AT_STATUS_TIMEOUT: return "timeout";
+	case AT_STATUS_NOPORT:  return "no_port";
+	case AT_STATUS_BUSY:    return "busy";
+	default:                return "unknown";
 	}
+}
+
+/* Complete a deferred reply with the outcome of one AT exchange. */
+static void pending_reply(struct pending_at *p, struct at_req *r,
+			  enum at_status status, const char *response)
+{
+	struct blob_buf b = {};
 
 	blob_buf_init(&b, 0);
-	blobmsg_add_string(&b, "status", name);
-	blobmsg_add_string(&b, "command", r->cmd);
+	blobmsg_add_string(&b, "status", at_status_name(status));
+	blobmsg_add_string(&b, "command", r ? r->cmd : "");
 	blobmsg_add_string(&b, "response", response ? response : "");
 	ubus_send_reply(p->ctx, &p->req, b.head);
 	blob_buf_free(&b);
@@ -102,8 +138,13 @@ static void manual_at_cb(struct at_req *r, enum at_status status,
 	/* A user-issued command is also how the UI says "I am here": keep the
 	 * foreground window open so the polling tiers stay warm for a moment. */
 	fm160_sched_report_foreground();
-
 	free(p);
+}
+
+static void manual_at_cb(struct at_req *r, enum at_status status,
+			 const char *response, void *arg)
+{
+	pending_reply(arg, r, status, response);
 }
 
 /* ------------------------------------------------------------------ */
@@ -271,6 +312,150 @@ static int handle_enabled(struct ubus_context *ctx, struct ubus_object *obj,
 	return reply_snapshot(ctx, req);
 }
 
+/*
+ * --- M4 write handlers ----------------------------------------------
+ *
+ * Both defer, then hand off to the write sequence in cmds.c, which is
+ * responsible for the write -> read-back -> re-parse round trip.  The reply
+ * only reports whether that round trip worked; the values themselves arrive
+ * through the next "status".
+ *
+ * Neither handler validates the band encoding or the cell-lock ranges beyond
+ * what is needed to build a safe command line: the authoritative checks live
+ * in fm160_bands_command()/fm160_celllock_command(), so a second copy here
+ * could only drift out of sync with them.
+ */
+
+/* Allocate the deferred-reply context and mark the request deferred. */
+static struct pending_at *pending_begin(struct ubus_context *ctx,
+					struct ubus_request_data *req)
+{
+	struct pending_at *p = calloc(1, sizeof(*p));
+
+	if (!p)
+		return NULL;
+	p->ctx = ctx;
+	ubus_defer_request(ctx, req, &p->req);
+	return p;
+}
+
+/* Fail a deferred reply that was never handed to the AT queue. */
+static int pending_abort(struct ubus_context *ctx, struct pending_at *p,
+			 int status)
+{
+	ubus_complete_deferred_request(ctx, &p->req, status);
+	free(p);
+	/* The deferred reply carries the error; returning OK here only stops
+	 * libubus from trying to answer a request that is already answered. */
+	return UBUS_STATUS_OK;
+}
+
+static int handle_setbands(struct ubus_context *ctx, struct ubus_object *obj,
+			   struct ubus_request_data *req, const char *method,
+			   struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_BANDS_MAX];
+	struct pending_at *p;
+	const char *bands;
+
+	blobmsg_parse(bands_policy, __ATTR_BANDS_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_BANDS])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	bands = blobmsg_get_string(tb[ATTR_BANDS]);
+	/* The same length guard the "at" method uses: this string ends up
+	 * inside a fixed command buffer, so it must not be able to overflow it. */
+	if (!bands[0] || strlen(bands) > FM160_AT_CMD_MAX - 16)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (!g_state.port_found)
+		return UBUS_STATUS_NOT_FOUND;
+	if (g_state.at_state == 2)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	/* The capability enumeration is the licence to write.  Without it we do
+	 * not know which tokens this firmware accepts, and AT+GTACT is
+	 * persistent - a wrong guess survives a reboot. */
+	if (!g_state.gtact_caps.valid) {
+		fm160_log(LOG_WARNING, "setbands refused: AT+GTACT=? not enumerated");
+		return UBUS_STATUS_NOT_SUPPORTED;
+	}
+
+	p = pending_begin(ctx, req);
+	if (!p)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	if (fm160_cmd_set_bands(bands, manual_at_cb, p))
+		return pending_abort(ctx, p, UBUS_STATUS_UNKNOWN_ERROR);
+	return UBUS_STATUS_OK;
+}
+
+static int handle_setcelllock(struct ubus_context *ctx, struct ubus_object *obj,
+			      struct ubus_request_data *req, const char *method,
+			      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_CELLLOCK_MAX];
+	struct pending_at *p;
+	/* -1 is "the caller did not supply this field".  For pci, scs and nrband
+	 * that is different from 0: PCI 0 is a real cell, SCS 0 is 15 kHz, and
+	 * NR band 0 does not exist - see fm160_celllock_command(). */
+	int mode, rat = 0, type = 0, pci = -1, scs = -1, nrband = -1;
+	unsigned long long earfcn = 0;
+
+	blobmsg_parse(celllock_policy, __ATTR_CELLLOCK_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_MODE])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	mode = (int)blobmsg_get_u32(tb[ATTR_MODE]);
+	/* Only the two documented values.  The live modem also advertises mode
+	 * 2 in AT+GTCELLLOCK=?; writing an undocumented value into a persistent
+	 * EFS setting is not a risk this milestone takes. */
+	if (mode != 0 && mode != 1)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	if (tb[ATTR_RAT])    rat    = (int)blobmsg_get_u32(tb[ATTR_RAT]);
+	if (tb[ATTR_TYPE])   type   = (int)blobmsg_get_u32(tb[ATTR_TYPE]);
+	if (tb[ATTR_EARFCN]) earfcn = blobmsg_get_u64(tb[ATTR_EARFCN]);
+	if (tb[ATTR_PCI])    pci    = (int)blobmsg_get_u32(tb[ATTR_PCI]);
+	if (tb[ATTR_SCS])    scs    = (int)blobmsg_get_u32(tb[ATTR_SCS]);
+	if (tb[ATTR_NRBAND]) nrband = (int)blobmsg_get_u32(tb[ATTR_NRBAND]);
+
+	if (!g_state.port_found)
+		return UBUS_STATUS_NOT_FOUND;
+	if (g_state.at_state == 2)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	if (!g_state.celllock_caps.valid) {
+		fm160_log(LOG_WARNING,
+			  "setcelllock refused: AT+GTCELLLOCK=? not enumerated");
+		return UBUS_STATUS_NOT_SUPPORTED;
+	}
+
+	if (mode == 1) {
+		/* Enabling needs a frequency to lock to.  earfcn 0 is a real
+		 * value in the range the modem reports, so "absent" and "zero"
+		 * are different things and only absence is rejected. */
+		if (!tb[ATTR_EARFCN])
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		if (earfcn > g_state.celllock_caps.earfcn_max)
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		if (pci >= 0 && pci > g_state.celllock_caps.pci_max)
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		if (scs >= 0 && (scs < g_state.celllock_caps.scs_min ||
+				 scs > g_state.celllock_caps.scs_max))
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		if (nrband >= 0 && (nrband < g_state.celllock_caps.nrband_min ||
+				    nrband > g_state.celllock_caps.nrband_max))
+			return UBUS_STATUS_INVALID_ARGUMENT;
+	}
+
+	p = pending_begin(ctx, req);
+	if (!p)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	if (fm160_cmd_set_celllock(mode, rat, type, earfcn, pci, scs, nrband,
+				   manual_at_cb, p))
+		return pending_abort(ctx, p, UBUS_STATUS_UNKNOWN_ERROR);
+	return UBUS_STATUS_OK;
+}
+
 static const struct ubus_method fm160_methods[] = {
 	UBUS_METHOD_NOARG("status",   handle_status),
 	UBUS_METHOD("profile",   handle_profile,   profile_policy),
@@ -279,6 +464,10 @@ static const struct ubus_method fm160_methods[] = {
 	UBUS_METHOD_NOARG("ident",    handle_ident),
 	UBUS_METHOD_NOARG("identity", handle_identity),
 	UBUS_METHOD("enabled",   handle_enabled,   enabled_policy),
+	/* M4.  Both defer, because both have to wait for a write and then a
+	 * read-back before the answer means anything. */
+	UBUS_METHOD("setbands",     handle_setbands,     bands_policy),
+	UBUS_METHOD("setcelllock",  handle_setcelllock,  celllock_policy),
 };
 
 static struct ubus_object_type fm160_obj_type =

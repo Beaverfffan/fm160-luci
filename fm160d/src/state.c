@@ -183,11 +183,79 @@ static void cell_to_blob(struct blob_buf *b, const char *name,
 	blobmsg_close_table(b, t);
 }
 
+/*
+ * --- M4 helpers ---------------------------------------------------------
+ *
+ * A band is three integers, so the band lists are rendered as arrays of
+ * tables rather than as strings: LuCI then gets the decoded value without
+ * having to re-implement the encoding, which differs per RAT and which
+ * fm160_band_decode() already owns.  The raw token travels alongside because
+ * the raw form - not the decoded one - is what has to be written back.
+ */
+static void band_to_blob(struct blob_buf *b, const struct fm160_band *bd)
+{
+	void *t = blobmsg_open_table(b, NULL);
+
+	blobmsg_add_u32(b, "raw", bd->raw);
+	blobmsg_add_u32(b, "band", bd->band);
+	blobmsg_add_u32(b, "rat", bd->rat);
+	blobmsg_close_table(b, t);
+}
+
+static void band_array_to_blob(struct blob_buf *b, const char *name,
+			       const struct fm160_band *v, int n)
+{
+	void *a = blobmsg_open_array(b, name);
+	int i;
+
+	for (i = 0; i < n; i++)
+		band_to_blob(b, &v[i]);
+	blobmsg_close_array(b, a);
+}
+
+/* Plain integer list, used for the rat/pref1/pref2 capability groups. */
+static void int_array_to_blob(struct blob_buf *b, const char *name,
+			      const int *v, int n)
+{
+	void *a = blobmsg_open_array(b, name);
+	int i;
+
+	for (i = 0; i < n; i++)
+		blobmsg_add_u32(b, NULL, (uint32_t)v[i]);
+	blobmsg_close_array(b, a);
+}
+
+/*
+ * One carrier-aggregation row.  dl_mod/ul_mod are exported as the raw code
+ * (0 BPSK .. 5 1024QAM, 6 unknown) so that a UI which has not been updated
+ * still shows something honest.
+ */
+static void ca_cell_to_blob(struct blob_buf *b, const struct fm160_ca_cell *c)
+{
+	void *t = blobmsg_open_table(b, NULL);
+
+	blobmsg_add_u8(b, "valid", c->valid);
+	blobmsg_add_u8(b, "is_pcc", c->is_pcc);
+	blobmsg_add_u32(b, "state", c->state);
+	blobmsg_add_u32(b, "band", c->band);
+	blobmsg_add_u32(b, "pci", c->pci);
+	blobmsg_add_u64(b, "freq", c->freq);
+	blobmsg_add_u32(b, "dl_bw_mhz", c->dl_bw_mhz);
+	blobmsg_add_u32(b, "ul_bw_mhz", c->ul_bw_mhz);
+	blobmsg_add_u32(b, "dl_mimo", c->dl_mimo);
+	blobmsg_add_u32(b, "ul_mimo", c->ul_mimo);
+	blobmsg_add_u32(b, "dl_mod", c->dl_mod);
+	blobmsg_add_u32(b, "ul_mod", c->ul_mod);
+	blobmsg_add_u32(b, "rsrp_dbm", c->rsrp_dbm);
+	blobmsg_close_table(b, t);
+}
+
 struct blob_buf *fm160_state_blob(void)
 {
 	static struct blob_buf b;
 	struct blob_attr *cells;
-	int i;
+	void *m4;
+	int i, j;
 
 	/* Reusable buffer: free the previous contents before refilling so that
 	 * repeated calls do not leak.  blob_buf_free() resets head/buf/buflen,
@@ -286,6 +354,175 @@ struct blob_buf *fm160_state_blob(void)
 	for (i = 0; i < g_state.neigh_count; i++)
 		cell_to_blob(&b, NULL, &g_state.neigh[i]);
 	blobmsg_close_array(&b, cells);
+
+	/* --- M4: band lock / cell lock / carrier aggregation ----------- */
+	/*
+	 * CONVENTION, and it is not the obvious one: blobmsg_open_table() /
+	 * blobmsg_open_array() return a HANDLE that is only ever handed back to
+	 * blobmsg_close_*().  Every value and every nested open still goes into the
+	 * same struct blob_buf - &b - because that is where libubox tracks the
+	 * current head.  Passing the handle instead (blobmsg_add_u32(&t, ...))
+	 * compiles perfectly and then dereferences a void* as a blob_buf, which on
+	 * this device was a SIGSEGV inside fm160_state_publish() every time the
+	 * identity chain finished.
+	 */
+	m4 = blobmsg_open_table(&b, "m4");
+
+	/* AT+GTACT? - the restriction actually in force right now. */
+	{
+		void *g = blobmsg_open_table(&b, "bands");
+
+		blobmsg_add_u8(&b, "valid", g_state.gtact.valid);
+		blobmsg_add_u32(&b, "rat", (uint32_t)g_state.gtact.rat);
+		blobmsg_add_u32(&b, "pref1", (uint32_t)g_state.gtact.pref1);
+		blobmsg_add_u32(&b, "pref2", (uint32_t)g_state.gtact.pref2);
+		/* Bands the modem listed that match no documented encoding.
+		 * Counted, never guessed - a non-zero value means the firmware
+		 * is not the one the parser was written against. */
+		blobmsg_add_u32(&b, "unknown", (uint32_t)g_state.gtact.unknown_n);
+		blobmsg_add_u8(&b, "auto_seen", g_state.gtact.auto_seen);
+		band_array_to_blob(&b, "umts", g_state.gtact.umts, g_state.gtact.umts_n);
+		band_array_to_blob(&b, "lte", g_state.gtact.lte, g_state.gtact.lte_n);
+		band_array_to_blob(&b, "nr", g_state.gtact.nr, g_state.gtact.nr_n);
+		if (g_state.gtact.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.gtact.last_ok_ms);
+		blobmsg_close_table(&b, g);
+	}
+
+	/* AT+GTACT=? - what the modem says it supports.  This is the licence
+	 * for the write path: an invalid caps set means the UI must refuse to
+	 * offer band editing rather than let the user guess. */
+	{
+		void *g = blobmsg_open_table(&b, "band_caps");
+		void *gn;
+
+		blobmsg_add_u8(&b, "valid", g_state.gtact_caps.valid);
+		int_array_to_blob(&b, "rat", g_state.gtact_caps.rat,
+				  g_state.gtact_caps.rat_n);
+		int_array_to_blob(&b, "pref1", g_state.gtact_caps.pref1,
+				  g_state.gtact_caps.pref1_n);
+		int_array_to_blob(&b, "pref2", g_state.gtact_caps.pref2,
+				  g_state.gtact_caps.pref2_n);
+		band_array_to_blob(&b, "umts", g_state.gtact_caps.umts,
+				   g_state.gtact_caps.umts_n);
+		band_array_to_blob(&b, "lte", g_state.gtact_caps.lte,
+				   g_state.gtact_caps.lte_n);
+		band_array_to_blob(&b, "nr", g_state.gtact_caps.nr,
+				   g_state.gtact_caps.nr_n);
+		/* Which of the nine groups the modem actually filled in.  On
+		 * FM160-CN the gsm, cdma and evdo groups come back empty. */
+		gn = blobmsg_open_array(&b, "group_nonempty");
+		for (i = 0; i < FM160_GTACT_GROUPS; i++)
+			blobmsg_add_u8(&b, NULL, g_state.gtact_caps.group_nonempty[i]);
+		blobmsg_close_array(&b, gn);
+		if (g_state.gtact_caps.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.gtact_caps.last_ok_ms);
+		blobmsg_close_table(&b, g);
+	}
+
+	/* AT+GTCELLLOCK? - persistent, and only takes effect after a UE reset
+	 * that fm160d deliberately never performs itself. */
+	{
+		void *c = blobmsg_open_table(&b, "celllock");
+
+		blobmsg_add_u8(&b, "valid", g_state.celllock.valid);
+		blobmsg_add_u8(&b, "enabled", g_state.celllock.enabled);
+		blobmsg_add_u32(&b, "rat", (uint32_t)g_state.celllock.rat);
+		blobmsg_add_u32(&b, "type", (uint32_t)g_state.celllock.type);
+		blobmsg_add_u64(&b, "earfcn", g_state.celllock.earfcn);
+		blobmsg_add_u32(&b, "pci", (uint32_t)g_state.celllock.pci);
+		blobmsg_add_u32(&b, "scs", (uint32_t)g_state.celllock.scs);
+		blobmsg_add_u32(&b, "nrband", (uint32_t)g_state.celllock.nrband);
+		blobmsg_add_u8(&b, "has_pci", g_state.celllock.has_pci);
+		blobmsg_add_u8(&b, "has_scs", g_state.celllock.has_scs);
+		blobmsg_add_u8(&b, "has_nrband", g_state.celllock.has_nrband);
+		if (g_state.celllock.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.celllock.last_ok_ms);
+		blobmsg_close_table(&b, c);
+	}
+
+	/* AT+GTCELLLOCK=? - ranges, not enumerations. */
+	{
+		void *c = blobmsg_open_table(&b, "celllock_caps");
+		void *a;
+		bool undocumented = false;
+
+		blobmsg_add_u8(&b, "valid", g_state.celllock_caps.valid);
+		a = blobmsg_open_array(&b, "mode");
+		for (i = 0; i < g_state.celllock_caps.mode_n; i++) {
+			blobmsg_add_u32(&b, NULL,
+					(uint32_t)g_state.celllock_caps.mode[i]);
+			/* The live modem offers a third mode value that the
+			 * manual does not define.  Recorded as evidence only;
+			 * fm160_celllock_command() refuses to write anything
+			 * other than 0 or 1. */
+			if (g_state.celllock_caps.mode[i] > 1)
+				undocumented = true;
+		}
+		blobmsg_close_array(&b, a);
+		blobmsg_add_u8(&b, "mode_undocumented", undocumented);
+		blobmsg_add_u32(&b, "rat_min", (uint32_t)g_state.celllock_caps.rat_min);
+		blobmsg_add_u32(&b, "rat_max", (uint32_t)g_state.celllock_caps.rat_max);
+		a = blobmsg_open_array(&b, "type");
+		for (i = 0; i < g_state.celllock_caps.type_n; i++)
+			blobmsg_add_u32(&b, NULL,
+					(uint32_t)g_state.celllock_caps.type[i]);
+		blobmsg_close_array(&b, a);
+		/* u64, not u32: blobmsg formats an INT32 as a SIGNED int32, so
+		 * this value - the top of the range the modem advertises - comes
+		 * back as -1 on the wire.  It really is 4294967295. */
+		blobmsg_add_u64(&b, "earfcn_max", g_state.celllock_caps.earfcn_max);
+		blobmsg_add_u32(&b, "pci_max", (uint32_t)g_state.celllock_caps.pci_max);
+		blobmsg_add_u32(&b, "scs_min", (uint32_t)g_state.celllock_caps.scs_min);
+		blobmsg_add_u32(&b, "scs_max", (uint32_t)g_state.celllock_caps.scs_max);
+		blobmsg_add_u32(&b, "nrband_min", (uint32_t)g_state.celllock_caps.nrband_min);
+		blobmsg_add_u32(&b, "nrband_max", (uint32_t)g_state.celllock_caps.nrband_max);
+		if (g_state.celllock_caps.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.celllock_caps.last_ok_ms);
+		blobmsg_close_table(&b, c);
+	}
+
+	/* AT+GTCAINFO? - "valid" is false both when the modem is idle (a bare
+	 * OK, measured with no SIM) and when the read failed; ca_age_ms only
+	 * appears once a PCC row has actually been seen. */
+	{
+		void *c = blobmsg_open_table(&b, "ca");
+		void *a;
+
+		blobmsg_add_u8(&b, "valid", g_state.ca.valid);
+		blobmsg_add_u32(&b, "rat", (uint32_t)g_state.ca.rat);
+		blobmsg_add_u8(&b, "has_nr", g_state.ca.has_nr);
+		if (g_state.ca.valid) {
+			void *p = blobmsg_open_table(&b, "pcc");
+
+			blobmsg_add_u32(&b, "state", g_state.ca.pcc.state);
+			blobmsg_add_u32(&b, "band", g_state.ca.pcc.band);
+			blobmsg_add_u32(&b, "pci", g_state.ca.pcc.pci);
+			blobmsg_add_u64(&b, "freq", g_state.ca.pcc.freq);
+			blobmsg_add_u32(&b, "dl_bw_mhz", g_state.ca.pcc.dl_bw_mhz);
+			blobmsg_add_u32(&b, "ul_bw_mhz", g_state.ca.pcc.ul_bw_mhz);
+			blobmsg_add_u32(&b, "dl_mimo", g_state.ca.pcc.dl_mimo);
+			blobmsg_add_u32(&b, "ul_mimo", g_state.ca.pcc.ul_mimo);
+			blobmsg_add_u32(&b, "dl_mod", g_state.ca.pcc.dl_mod);
+			blobmsg_add_u32(&b, "ul_mod", g_state.ca.pcc.ul_mod);
+			blobmsg_add_u32(&b, "rsrp_dbm", g_state.ca.pcc.rsrp_dbm);
+			blobmsg_close_table(&b, p);
+		}
+		a = blobmsg_open_array(&b, "scc");
+		for (j = 0; j < g_state.ca.scc_n; j++)
+			ca_cell_to_blob(&b, &g_state.ca.scc[j]);
+		blobmsg_close_array(&b, a);
+		if (g_state.ca.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.ca.last_ok_ms);
+		blobmsg_close_table(&b, c);
+	}
+
+	blobmsg_close_table(&b, m4);
 
 	/* --- traffic -------------------------------------------------- */
 	{
