@@ -88,15 +88,24 @@ FM160_LUCI_LIBDIR:=/usr/lib/lua/luci
 # One entry per shipped translation, "<po directory>:<lmo suffix>".  The po
 # directory name is the locale in OpenWrt's spelling (zh_Hans); the .lmo suffix
 # is LuCI's alias for it (zh-cn), which is what load_catalog() globs for.  Add a
-# language by adding its po/ directory and one entry here.
-FM160_TRANSLATIONS:=zh_Hans:zh-cn zh_Hant:zh-tw
+# language by adding its po/ directory and one entry here -- in that order, and
+# never one without the other.
+#
+# zh_Hans is the only translation that ships.  An earlier revision of this list
+# also carried "zh_Hant:zh-tw", which was an intention and never a deliverable:
+# there is no po/zh_Hant, so that entry asked the build for a translation package
+# with nothing in it.  The two checks further down turn the mismatch into a hard
+# error instead of an empty package, which is why it could not survive here --
+# but an error that only appears once make reaches this directory is a poor way
+# to find out, so tools/i18n/check.py asserts the same invariant from the
+# repository alone, before anything is built.
+FM160_TRANSLATIONS:=zh_Hans:zh-cn
 
 # The label recorded in luci.languages.  Only the *existence* of that option is
 # ever read (dispatcher.uc uses it to resolve 'auto' Accept-Language), never the
 # value, but keep it the string the base translation uses so anything that ever
 # does display it agrees.
 FM160_LANG_TITLE.zh_Hans:=简体中文 (Simplified Chinese)
-FM160_LANG_TITLE.zh_Hant:=正體中文 (Traditional Chinese)
 
 FM160_lang=$(word 1,$(subst :, ,$(1)))
 FM160_alias=$(word 2,$(subst :, ,$(1)))

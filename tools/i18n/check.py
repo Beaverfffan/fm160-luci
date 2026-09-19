@@ -640,6 +640,53 @@ def compare_lmo(entries, id2hash, id2val):
     return problems
 
 
+# ---------------------------------------------------------------------------
+# the Makefile's half of the contract
+# ---------------------------------------------------------------------------
+
+def declared_translations(mk):
+    """The (po directory, lmo alias) pairs FM160_TRANSLATIONS names.
+
+    Parsed, not substring-matched.  The check this replaced looked for the
+    literal string 'FM160_TRANSLATIONS:=zh_Hans:zh-cn' in the Makefile, which
+    is a *prefix* of a longer list -- so appending 'zh_Hant:zh-tw' to that list
+    left the check green while the entry it added named a locale with no po/
+    directory to compile.  Returns None when the assignment is unparsable.
+    """
+    m = re.search(r'^FM160_TRANSLATIONS\s*:=\s*(.*?)\s*$', mk, re.M)
+    if not m:
+        return None
+    return [tuple(e.split(':', 1)) for e in m.group(1).split() if ':' in e]
+
+
+def translation_gaps(mk, po_dir):
+    """Where FM160_TRANSLATIONS and po/ disagree, in both directions.
+
+    `missing` is the dangerous direction: a locale the Makefile names with no
+    po/<locale>/ to back it builds a translation package that installs cleanly
+    and translates nothing -- and because the Makefile's own $(error) fires
+    during the package scan, the scan records the application but not its
+    translations, so the image ships with no .lmo at all.  `extra` is a po/
+    directory that looks maintained and never reaches a device.
+    """
+    declared = declared_translations(mk)
+    if declared is None:
+        return None, None
+    names = [n for n, _ in declared]
+
+    def pos_in(d):
+        full = os.path.join(po_dir, d)
+        if not os.path.isdir(full):
+            return []
+        return [f for f in os.listdir(full) if f.endswith('.po')]
+
+    missing = [n for n in names if not pos_in(n)]
+    present = sorted(
+        d for d in (os.listdir(po_dir) if os.path.isdir(po_dir) else [])
+        if os.path.isdir(os.path.join(po_dir, d)) and d != 'templates')
+    return missing, [d for d in present if d not in names]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--repo', default=None)
@@ -1149,8 +1196,6 @@ def main():
     for what, needle in (
             ('the lmo directory is the one dispatcher.uc reads',
              '/usr/lib/lua/luci'),
-            ('the lmo suffix is the LuCI alias, not the po directory name',
-             'FM160_TRANSLATIONS:=zh_Hans:zh-cn'),
             ('po2lmo is a build dependency', 'luci-base/host'),
             ('the recipe compiles the po it ships', 'po2lmo $(po)'),
             ('the recipe records the language for auto detection',
@@ -1158,6 +1203,68 @@ def main():
     ):
         rep.check('Makefile: %s' % what, needle in mk,
                   'expected to find %r' % needle)
+
+    # FM160_TRANSLATIONS is where the Makefile names a locale; po/<locale>/ is
+    # where that locale actually exists.  The two have to agree, and the check
+    # that used to live here -- `'FM160_TRANSLATIONS:=zh_Hans:zh-cn' in mk` --
+    # could not see them disagree, because that string is a *prefix* of a list
+    # that also declared zh_Hant.  A locale was added with no po/ directory to
+    # back it and the gate stayed green; the Makefile's own guard then turned it
+    # into $(error), which is the right outcome at the wrong moment.  It fires
+    # when make reaches package/compile, hours into a build, and -- worse --
+    # during the package scan, which stops at the error: the scan records the
+    # application and not its translations, so fixing the Makefile alone would
+    # still have shipped an image whose LuCI has no Chinese in it at all.
+    assignments = re.findall(r'^FM160_TRANSLATIONS\s*:=', mk, re.M)
+    rep.check('Makefile: FM160_TRANSLATIONS is assigned exactly once',
+              len(assignments) == 1,
+              'found %d assignments; the last one silently wins' % len(assignments))
+
+    declared = declared_translations(mk)
+    rep.check('Makefile: FM160_TRANSLATIONS parses as <po dir>:<lmo suffix> pairs',
+              declared is not None, 'no FM160_TRANSLATIONS assignment found')
+    declared = declared or []
+
+    missing, extra = translation_gaps(mk, po_dir)
+    rep.check('Makefile: every locale FM160_TRANSLATIONS names has a po/ directory',
+              missing is not None and not missing,
+              'declared with nothing to compile: %s' % ', '.join(missing or []))
+    rep.check('Makefile: every po/ directory is named in FM160_TRANSLATIONS',
+              extra is not None and not extra,
+              'never packaged: %s' % ', '.join(extra or []))
+
+    for po_name, alias in declared:
+        # The recipe does $(or $(FM160_LANG_TITLE.<locale>),<locale>), so a
+        # missing label is not fatal -- it just puts the raw locale name in the
+        # language picker.
+        rep.check('Makefile: FM160_LANG_TITLE.%s is defined' % po_name,
+                  ('FM160_LANG_TITLE.%s:=' % po_name) in mk,
+                  'the luci.languages label would fall back to %r' % po_name)
+        # load_catalog() globs "<basename>.<alias>.lmo", so the alias is a
+        # filename component, not a display name.
+        rep.check('Makefile: the alias %r is a lower-case lmo suffix' % alias,
+                  re.match(r'^[a-z]{2,3}(-[a-z0-9]+)+$', alias) is not None,
+                  'fm160.%s.lmo would never be matched by "*.%s.lmo"' % (alias, alias))
+
+    # The gap check is only worth having if it can see the gap it was written
+    # for, so hand it a Makefile that differs from this one by a single line:
+    # one that declares a locale nothing could have a po/ directory for, and
+    # consequently no longer declares the ones that are there.  One substitution
+    # exercises both directions.  If this ever stops reporting both, the two
+    # checks above have quietly become decoration.
+    planted = re.sub(r'^FM160_TRANSLATIONS\s*:=\s*.*$',
+                     'FM160_TRANSLATIONS:=zz_ZZ:zz-zz', mk, count=1, flags=re.M)
+    rep.check('selftest: the Makefile mutation for the gap check applied',
+              planted != mk, 'no FM160_TRANSLATIONS line to mutate')
+    p_missing, p_extra = translation_gaps(planted, po_dir)
+    rep.check('selftest: a declared locale with no po/ directory is caught',
+              p_missing == ['zz_ZZ'], 'saw missing=%r' % (p_missing,))
+    here = sorted(
+        d for d in (os.listdir(po_dir) if os.path.isdir(po_dir) else [])
+        if os.path.isdir(os.path.join(po_dir, d)) and d != 'templates')
+    rep.check('selftest: a po/ directory no entry names is caught',
+              bool(here) and sorted(p_extra or []) == here,
+              'saw extra=%r, expected %r' % (p_extra, here))
 
     # -- summary -----------------------------------------------------------
     print('\n%s: %d passed, %d failed, %d skipped, %d warnings'
