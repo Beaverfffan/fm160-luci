@@ -1273,6 +1273,29 @@ def main():
                   re.match(r'^[a-z]{2,3}(-[a-z0-9]+)+$', alias) is not None,
                   'fm160.%s.lmo would never be matched by "*.%s.lmo"' % (alias, alias))
 
+    # The silent one.  A HIDDEN package with no DEFAULT is generated as a bare
+    # "tristate" whose only default is "y if DEFAULT_<itself>", a symbol nothing
+    # defines, so no configuration can ever select it: it compiles for no image,
+    # and on the device that is indistinguishable from a translation nobody
+    # wrote.  luci.mk sets DEFAULT:=LUCI_LANG_<po directory>||(ALL&&m) on every
+    # translation package it builds.  This template has to resolve the same
+    # symbol, through FM160_PO so that the alias and the locale directory it
+    # names cannot drift apart.
+    resolved = ', '.join('luci-i18n-fm160-%s <- LUCI_LANG_%s||(ALL&&m)' % (a, d)
+                         for a, d in declared if d)
+    default_field = 'DEFAULT:=LUCI_LANG_$(FM160_PO.$(1))||(ALL&&m)'
+    rep.check('Makefile: the template sets DEFAULT from the po directory',
+              default_field in mk,
+              'without it the generated symbol defaults only to "y if '
+              'DEFAULT_<itself>", which nothing defines, so nothing can select '
+              'the translation package and the image ships without the .lmo '
+              '(%s)' % (resolved or 'no translation declared'))
+
+    without = mk.replace(default_field, '')
+    rep.check('selftest: dropping the DEFAULT field is detected',
+              without != mk and default_field not in without,
+              'the mutation did not apply, so the check above proves nothing')
+
     # The alias reaches $(1) of the template through a $(call), which does not
     # trim: a backslash-newline inside one expands to a space, so a call split
     # across lines passes " zh-cn" and every name built from it inherits the

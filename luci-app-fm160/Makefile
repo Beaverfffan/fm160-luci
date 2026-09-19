@@ -11,8 +11,8 @@
 #
 # The one thing given up by that choice is luci.mk's automatic .po -> .lmo
 # translation packaging, so the block at the bottom of this file re-implements
-# it.  It is a re-implementation, not a copy, and the four things it has to get
-# right are the four things luci.mk hardcodes -- all of them silent when wrong:
+# it.  It is a re-implementation, not a copy, and the five things it has to get
+# right are the five things luci.mk hardcodes -- all of them silent when wrong:
 #
 #   * the catalog directory is /usr/lib/lua/luci/i18n (LUCI_LIBRARYDIR, i.e.
 #     /usr/lib/lua/luci + /i18n).  Not /usr/lib/luci/i18n.  dispatcher.uc
@@ -24,6 +24,12 @@
 #     installed as fm160.zh-cn.lmo.  load_catalog() globs "*.zh-cn.lmo", so a
 #     wrong alias means no match and no error.
 #   * the translation ships as its own hidden package, not as part of the app.
+#   * that package carries DEFAULT:=LUCI_LANG_<po directory>||(ALL&&m).  A
+#     HIDDEN package with no DEFAULT is generated as a bare "tristate" whose
+#     only default is "y if DEFAULT_<itself>", a symbol nothing defines, so
+#     nothing can ever select it: it compiles for no image and the failure
+#     looks exactly like a translation that was never written.  This is the one
+#     of the five that has no symptom on the device at all, beyond English.
 #   * that package's uci-defaults must create the luci.languages entry, because
 #     dispatcher.uc decides an 'auto' language request by looking for the
 #     *existence* of uci.languages.<lang>.
@@ -148,6 +154,7 @@ define BuildFm160Translation
     SUBMENU:=3. Applications
     TITLE:=luci-app-fm160 - $(1) translation
     HIDDEN:=1
+    DEFAULT:=LUCI_LANG_$(FM160_PO.$(1))||(ALL&&m)
     DEPENDS:=luci-app-fm160
     PKGARCH:=all
   endef
@@ -164,6 +171,18 @@ define BuildFm160Translation
 	$(foreach po,$(wildcard ./po/$(FM160_PO.$(1))/*.po), \
 		po2lmo $(po) \
 			$$(1)$(FM160_LUCI_LIBDIR)/i18n/$(basename $(notdir $(po))).$(1).lmo;)
+  endef
+
+  # luci.mk ships this too, and it is the difference between "installed" and
+  # "in effect": /etc/uci-defaults is only swept at first boot, so an image gets
+  # the luci.languages entry for free, but the same package installed later with
+  # opkg would sit on an unrun script until the next reboot.  IPKG_INSTROOT is
+  # set while an image is being assembled, and empty on a live system.
+  define Package/luci-i18n-fm160-$(1)/postinst
+	[ -n "$$$${IPKG_INSTROOT}" ] || {
+		[ -f /etc/uci-defaults/luci-i18n-fm160-$(1) ] && (. /etc/uci-defaults/luci-i18n-fm160-$(1)) && rm -f /etc/uci-defaults/luci-i18n-fm160-$(1)
+		exit 0
+	}
   endef
 
   $$(eval $$(call BuildPackage,luci-i18n-fm160-$(1)))
