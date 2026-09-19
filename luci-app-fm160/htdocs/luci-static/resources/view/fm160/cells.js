@@ -267,7 +267,7 @@ return view.extend({
 			body.appendChild(E('div', {}, list.map(function(e) {
 				if (!api.bandUsable(e))
 					return E('span', { 'class': 'hint', 'style': 'margin-right:8px' },
-						_('raw') + ' ' + e.raw + ' (' + _('not decodable') + ')');
+						_('raw', 'fm160 raw marker') + ' ' + e.raw + ' (' + _('not decodable') + ')');
 
 				var id = 'fm160-band-' + e.rat + '-' + e.raw;
 
@@ -336,7 +336,7 @@ return view.extend({
 					self.paint(self.state);
 					return Promise.resolve();
 				})
-			}, _('Clear selection', 'fm160 band lock action'))
+			}, _('Clear selection'))
 		]));
 
 		return E('div', { 'class': 'cbi-section' }, [
@@ -412,7 +412,7 @@ return view.extend({
 		var manual = E('div', { 'style': 'margin-top:8px' }, [
 			E('p', { 'class': 'hint' },
 				_('Manual entry. The modem accepts %s and %s for the mode; its own capability answer lists a third value that the manual does not define, and this page will not write it.')
-					.format('0 (' + _('off', 'fm160 off state') + ')', '1 (' + _('on') + ')')),
+					.format('0 (' + _('off', 'fm160 off state') + ')', '1 (' + _('on', 'fm160 on state') + ')')),
 			disable
 		]);
 
@@ -536,7 +536,7 @@ return view.extend({
 		var lines = [
 			_('The following values will be written to the modem:'),
 			E('div', { 'style': 'font-family:monospace;margin:6px 0' }, [
-				E('div', {}, 'mode   = 1 (' + _('on') + ')'),
+				E('div', {}, 'mode   = 1 (' + _('on', 'fm160 on state') + ')'),
 				E('div', {}, 'rat    = ' + params.rat + ' (' + api.celllockRatName(params.rat) + ')'),
 				E('div', {}, 'type   = ' + params.type + ' (' + api.celllockTypeName(params.type) + ')'),
 				E('div', {}, 'earfcn = ' + params.earfcn),

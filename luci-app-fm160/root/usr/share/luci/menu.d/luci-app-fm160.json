@@ -10,7 +10,7 @@
 		}
 	},
 	"admin/fm160/overview": {
-		"title": "Overview",
+		"title": "Modem Overview",
 		"order": 10,
 		"action": {
 			"type": "view",
@@ -34,11 +34,19 @@
 		}
 	},
 	"admin/fm160/dial": {
-		"title": "Dial and USB",
+		"title": "Dial",
 		"order": 35,
 		"action": {
 			"type": "view",
 			"path": "fm160/dial"
+		}
+	},
+	"admin/fm160/usb": {
+		"title": "USB Mode",
+		"order": 36,
+		"action": {
+			"type": "view",
+			"path": "fm160/usb"
 		}
 	},
 	"admin/fm160/gnss": {

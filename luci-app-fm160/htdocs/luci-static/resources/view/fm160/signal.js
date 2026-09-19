@@ -174,7 +174,7 @@ return view.extend({
 					_('Band locking, cell locking and carrier aggregation live on the'), ' ',
 					E('a', { 'href': L.url('admin/fm160/cells') }, _('cells and locking')),
 					' ',
-					_('page.', 'fm160 signal page link')
+					_('page.')
 				])
 			]));
 		}

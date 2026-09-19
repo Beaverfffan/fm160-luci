@@ -14,7 +14,7 @@
 #   translated error is worse than an English one.
 #
 #   The coverage.  This file carries every string the front end can
-#   show: all eight javascript files, the menu titles, and the labels
+#   show: all nine javascript files, the menu titles, and the labels
 #   fm160d publishes from net.c and usbmode.c.  tools/i18n/check.py
 #   fails on any message it can extract that is missing here, so a new
 #   string added to a page is a red gate at the time it is written
@@ -108,7 +108,8 @@ msgstr "AT 降级——轮询已放慢"
 msgid "AT healthy"
 msgstr "AT 正常"
 
-#: fm160/api.js
+#: fm160/api.js view/fm160/cells.js
+msgctxt "fm160 raw marker"
 msgid "raw"
 msgstr "原始值"
 
@@ -402,7 +403,6 @@ msgid "Lock to the selected bands"
 msgstr "锁定到所选频段"
 
 #: view/fm160/cells.js
-msgctxt "fm160 band lock action"
 msgid "Clear selection"
 msgstr "清空选择"
 
@@ -454,7 +454,8 @@ msgstr "关闭锁小区"
 msgid "Manual entry. The modem accepts %s and %s for the mode; its own capability answer lists a third value that the manual does not define, and this page will not write it."
 msgstr "手动输入。模组对模式只接受 %s 和 %s；它自己的能力应答里还列了第三个值，而手册没有定义，本页面不会写入它。"
 
-#: view/fm160/cells.js
+#: view/fm160/cells.js view/fm160/gnss.js
+msgctxt "fm160 on state"
 msgid "on"
 msgstr "开启"
 
@@ -641,27 +642,27 @@ msgstr "（空应答）"
 msgid "call failed"
 msgstr "调用失败"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Continue"
 msgstr "继续"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "A profile change left the module unreachable."
 msgstr "一次 USB 配置切换后模组失联了。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "It has not answered since the switch, so fm160d is not trying again and will refuse further profile changes. The module needs a manual power cycle; nothing on this page can recover it."
 msgstr "切换之后它一直没有应答，因此 fm160d 不再重试，并会拒绝后续的配置切换。模组需要手动断电重启；本页面上没有任何操作能恢复它。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The module is restarting in profile"
 msgstr "模组正在重启到配置"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "It re-enumerates on the USB bus, which takes 30-90 s, and the AT port is absent until it finishes."
 msgstr "，并在 USB 总线上重新枚举（约 30–90 秒）。枚举完成前 AT 口不存在。"
 
-#: view/fm160/dial.js
+#: view/fm160/dial.js view/fm160/usb.js
 msgid "No AT port. The modem is either absent, or has not finished re-enumerating after a profile change."
 msgstr "没有 AT 口。要么模组不在，要么切换配置后尚未完成重新枚举。"
 
@@ -681,11 +682,11 @@ msgstr "下方设置里的模组重置是关闭的。"
 msgid "Connect is refused until a usable APN is set below."
 msgstr "在下方填入可用的 APN 之前，「连接」会被拒绝。"
 
-#: view/fm160/dial.js
+#: view/fm160/dial.js view/fm160/usb.js
 msgid "This USB profile is not an ECM profile, so fm160d does not dial it."
 msgstr "当前 USB 配置不是 ECM 配置，因此 fm160d 不拨它。"
 
-#: view/fm160/dial.js
+#: view/fm160/dial.js view/fm160/usb.js
 msgid "QMI and MBIM links are brought up by the kernel stack through netifd - use the network configuration for that, and leave the button below alone."
 msgstr "QMI 与 MBIM 链路由内核协议栈经 netifd 建立——请到网络配置里操作，不要用下面的按钮。"
 
@@ -706,7 +707,7 @@ msgstr "链路"
 msgid "Step"
 msgstr "阶段"
 
-#: view/fm160/dial.js
+#: view/fm160/dial.js view/fm160/usb.js
 msgid "USB profile"
 msgstr "USB 配置"
 
@@ -854,169 +855,169 @@ msgstr "三次尝试失败后，fm160d 可以重置模组——24 小时内最�
 msgid "Save"
 msgstr "保存"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Active profile"
 msgstr "当前配置"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "not read yet - 17 and 32 share a USB ID, and so do 18 and 33, so the number has to be read back with AT+GTUSBMODE?"
 msgstr "尚未读取——17 与 32 共用 USB ID，18 与 33 也是，所以这个号只能用 AT+GTUSBMODE? 回读"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Rollback point"
 msgstr "回滚点"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Profile list"
 msgstr "配置清单"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "answered by the modem"
 msgstr "模组回答"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "the modem has not answered AT+GTUSBMODE=? - no profile change is allowed until it does, which happens at boot and on a rescan"
 msgstr "模组尚未回答 AT+GTUSBMODE=?——在它回答之前不允许切换配置。这个问询在启动时和重新扫描时发生"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Switching a profile restarts the module."
 msgstr "切换配置会重启模组。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The modem disappears from the USB bus and comes back as a different device, so the network drops for roughly 30-90 s. fm160d reads the profile back afterwards: if it did not change it rolls back once, and if the module never answers it stops and says so above."
 msgstr "模组会从 USB 总线上消失、再以另一个设备回来，因此网络中断约 30–90 秒。之后 fm160d 会回读配置：如果没变就回滚一次；如果模组始终不应答，它就停下来并在上方说明。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Profiles that would leave no AT interface at all, or whose AT interface the kernel has no driver for, are listed as refused and cannot be chosen - the FM160 has no reset-to-default that the host can trigger, so that would be a one-way trip."
 msgstr "会完全失去 AT 接口的配置，或内核没有对应驱动的 AT 接口，都列在拒绝项里、无法选择——FM160 没有主机可触发的恢复默认配置，那会是一条单程路。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Also show profiles that are not in the FM160 AT manual"
 msgstr "同时显示不在 FM160 AT 手册中的配置"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "These are device dependent: the vendor lists them in its port table and says nothing else about them. They are refused unless this is ticked."
 msgstr "这些是设备相关的：厂商只在端口表里列了它们，其他一概没说。不勾选就会被拒绝。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The profile list could not be read"
 msgstr "配置清单读取失败"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Reading the profile list..."
 msgstr "正在读取配置清单…"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "This unit reports no profile this firmware knows how to name. Nothing is offered, because on any other platform the same mode numbers mean something else."
 msgstr "这台设备报告的配置里没有本固件能命名的。因此不提供任何选项——在别的平台上，同样的模式号含义完全不同。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgctxt "fm160 profile table heading"
 msgid "Available"
 msgstr "可选"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "No profile may be chosen right now."
 msgstr "当前没有可选的配置。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The modem has not answered AT+GTUSBMODE=?, so nothing may be chosen."
 msgstr "模组尚未回答 AT+GTUSBMODE=?，因此没有可选项。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Mode"
 msgstr "模式"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "USB ID"
 msgstr "USB ID"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Interfaces"
 msgstr "接口"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Dialled by"
 msgstr "由谁拨号"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "advanced"
 msgstr "高级"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "fm160d"
 msgstr "fm160d"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "the kernel stack"
 msgstr "内核协议栈"
 
-#: view/fm160/dial.js
-msgctxt "fm160 dial action"
+#: view/fm160/usb.js
+msgctxt "fm160 profile action"
 msgid "Switch"
 msgstr "切换"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Not offered"
 msgstr "不可选"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The module will restart in profile"
 msgstr "模组将重启到配置"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Every connection through it drops. The modem leaves the USB bus and comes back as a different device, so it is unreachable for roughly 30-90 s - including from this page."
 msgstr "经过它的所有连接都会中断。模组会离开 USB 总线、再以另一个设备回来，期间约 30–90 秒不可达——包括本页面。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The profile it is in now is not known, so there is nothing to go back to."
 msgstr "它当前所在的配置未知，因此没有可回退的目标。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "If it does not come back in the new profile, fm160d rolls back to"
 msgstr "如果它没有以新配置回来，fm160d 会回滚到"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "once."
 msgstr "一次。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "If that fails too, the module needs a manual power cycle. Nothing on this page can recover it."
 msgstr "如果那也失败，模组需要手动断电重启。本页面上的任何操作都无法恢复它。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "This profile is not in the FM160 AT manual. It appears here only because you asked for the advanced list; nothing documents how it behaves."
 msgstr "这个配置不在 FM160 AT 手册里。它出现在这里只是因为你勾选了高级列表；没有任何文档描述它的行为。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Switch USB profile?"
 msgstr "切换 USB 配置？"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Restart the module in profile"
 msgstr "以配置"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The switch request failed"
 msgstr "切换请求失败"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The switch has been sent. The module is restarting; expect it to be gone for 30-90 s. This page will follow it."
 msgstr "切换命令已发出。模组正在重启；预计它会消失 30–90 秒。本页面会跟着它。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The module is already in profile"
 msgstr "模组已经处于配置"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "The daemon refused the switch"
 msgstr "守护进程拒绝了这次切换"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "A profile change is already in progress."
 msgstr "已经有一次配置切换在进行中。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "Refused for now: no AT port, or the modem has not been asked which profile it is in."
 msgstr "暂时拒绝：没有 AT 口，或者还没问过模组处在哪个配置。"
 
@@ -1025,17 +1026,26 @@ msgctxt "fm160 dial notes heading"
 msgid "Notes"
 msgstr "说明"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
+msgctxt "fm160 usb notes heading"
+msgid "Notes"
+msgstr "说明"
+
+#: view/fm160/dial.js view/fm160/usb.js
 msgid "The ECM profile is dialled by fm160d itself, and a"
 msgstr "ECM 配置由 fm160d 自己拨，另有一个"
 
-#: view/fm160/dial.js
+#: view/fm160/dial.js view/fm160/usb.js
 msgid "interface exists so that netifd can own the address side of it. QMI and MBIM profiles are dialled by the kernel (uqmi / umbim) instead."
 msgstr "接口供 netifd 接管它的地址部分。QMI 与 MBIM 配置则改由内核（uqmi / umbim）拨号。"
 
-#: view/fm160/dial.js
+#: view/fm160/usb.js
 msgid "This page is a convenience, not the guard. fm160d re-checks every request: the profile decision runs inside the same function that would send the command, so nothing here can widen what is allowed."
 msgstr "本页面只是方便，不是守卫。fm160d 会重新检查每一个请求：配置决策就在那个将要发出命令的函数里执行，所以这里没有任何东西能放宽允许范围。"
+
+#: view/fm160/usb.js
+msgid "The profile the module is in is read back with AT+GTUSBMODE? rather than remembered, because 17 and 32 share a USB ID and so do 18 and 33 - the USB descriptors alone cannot tell which one is active."
+msgstr "模组当前处在哪个配置是用 AT+GTUSBMODE? 读回来的，而不是记下来的，因为 17 与 32 共用同一个 USB ID、18 与 33 也一样——单看 USB 描述符无法分辨生效的是哪一个。"
 
 #: view/fm160/dial.js
 msgid "The activation verb is probed rather than assumed. The vendor's AT manual says ECM uses +GTWWAN and only RNDIS uses +GTRNDIS, while the same vendor's dial-up document shows AT+GTRNDIS in its ECM chapter - so fm160d tries one and remembers which answered."
@@ -1044,6 +1054,10 @@ msgstr "激活动词是探测出来的，不是假定的。厂商的 AT 手册�
 #: view/fm160/dial.js
 msgid "This unit has no SIM card fitted, so the successful path of the dial ladder - registration, activation, address - has never run on real hardware. The refusals and the state machine have; the success path is code under test only."
 msgstr "这台机器没有装 SIM 卡，所以拨号阶梯的成功路径——注册、激活、拿到地址——从未在真机上跑过。拒绝路径和状态机跑过；成功路径只在测试里跑过。"
+
+#: view/fm160/dial.js
+msgid "Switching the USB profile restarts the module and is on its own page - it is not part of bringing the link up."
+msgstr "切换 USB 配置会重启模组，而且它自己单独占一个页面——它不属于把链路拨起来的一部分。"
 
 #: view/fm160/gnss.js
 msgid "fm160d does not publish GNSS data - the installed daemon is older than this page."
@@ -1118,6 +1132,7 @@ msgid "Longitude"
 msgstr "经度"
 
 #: view/fm160/gnss.js
+msgctxt "fm160 gnss field"
 msgid "Altitude"
 msgstr "海拔"
 
@@ -1126,7 +1141,6 @@ msgid "Geoid separation"
 msgstr "大地水准面差距"
 
 #: view/fm160/gnss.js
-msgctxt "fm160 gnss field"
 msgid "Speed"
 msgstr "速度"
 
@@ -1247,6 +1261,7 @@ msgid "Unrecognised entries"
 msgstr "无法识别的条目"
 
 #: view/fm160/gnss.js
+msgctxt "fm160 gnss field"
 msgid "Age"
 msgstr "年龄"
 
@@ -1647,7 +1662,6 @@ msgid "cells and locking"
 msgstr "小区与锁定"
 
 #: view/fm160/signal.js
-msgctxt "fm160 signal page link"
 msgid "page."
 msgstr "页面。"
 
@@ -1744,6 +1758,7 @@ msgid "New message"
 msgstr "新消息"
 
 #: view/fm160/sms.js
+msgctxt "fm160 sms field"
 msgid "Number"
 msgstr "号码"
 
@@ -1868,7 +1883,6 @@ msgid "Send this message?"
 msgstr "发送这条消息？"
 
 #: view/fm160/sms.js
-msgctxt "fm160 sms field"
 msgid "To"
 msgstr "收件人"
 
@@ -2009,8 +2023,8 @@ msgid "FM160"
 msgstr "FM160"
 
 #: menu.d
-msgid "Overview"
-msgstr "概览"
+msgid "Modem Overview"
+msgstr "模组概览"
 
 #: menu.d
 msgid "Signal Quality"
@@ -2021,8 +2035,12 @@ msgid "Cells and Locking"
 msgstr "小区与锁频"
 
 #: menu.d
-msgid "Dial and USB"
-msgstr "拨号与 USB"
+msgid "Dial"
+msgstr "拨号"
+
+#: menu.d
+msgid "USB Mode"
+msgstr "USB 模式"
 
 #: menu.d
 msgid "GNSS"

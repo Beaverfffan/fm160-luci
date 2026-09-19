@@ -277,7 +277,7 @@ return view.extend({
 
 		this.composeBox.appendChild(E('h3', {}, _('New message')));
 		this.composeBox.appendChild(E('table', { 'class': 'table' }, E('tbody', {}, [
-			row(_('Number'), this.inNumber),
+			row(_('Number', 'fm160 sms field'), this.inNumber),
 			E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td left' }, _('Text')),
 				E('td', { 'class': 'td' }, this.inText)
@@ -358,7 +358,7 @@ return view.extend({
 
 		var head = E('tr', { 'class': 'tr table-titles' }, [
 			E('th', { 'class': 'th' }, _('Direction')),
-			E('th', { 'class': 'th' }, _('Number')),
+			E('th', { 'class': 'th' }, _('Number', 'fm160 sms field')),
 			E('th', { 'class': 'th' }, _('Time (as stamped)')),
 			E('th', { 'class': 'th' }, _('Format')),
 			E('th', { 'class': 'th' }, _('Text')),
@@ -398,7 +398,7 @@ return view.extend({
 					'class': 'btn cbi-button',
 					'click': function() { ui.showModal(_('Message'), [
 						E('div', {}, [
-							E('p', {}, [ E('strong', {}, _('Number') + ': ' ), m.number || '-' ]),
+							E('p', {}, [ E('strong', {}, _('Number', 'fm160 sms field') + ': ' ), m.number || '-' ]),
 							E('p', {}, [ E('strong', {}, _('Time') + ': ' ),
 								ts ? ts.text + ' (' + ts.zone + ')' : '-' ]),
 							E('p', {}, [ E('strong', {}, _('Format') + ': ' ), fmt +
@@ -498,7 +498,7 @@ return view.extend({
 		}
 
 		return confirmPrompt(_('Send this message?'), [
-			_('To', 'fm160 sms field') + ': ' + number,
+			_('To') + ': ' + number,
 			_('This will be sent as') + ' ' + est.encoding + ', ' + est.parts + ' ' + _('segment(s)') + '.',
 			_('A sent message cannot be recalled.'),
 			_('Nothing is sent until you confirm.')
@@ -546,7 +546,7 @@ return view.extend({
 	handleDelete: function(m) {
 		var self = this;
 		var lines = [
-			_('To', 'fm160 sms field') + ': ' + (m.number || '-'),
+			_('To') + ': ' + (m.number || '-'),
 			m.index_known
 				? _('This removes the modem\'s copy (AT+CMGD=%d) as well as the copy held here.').format(m.index)
 				: _('The modem has no copy of this one; only the entry held here is removed.'),

@@ -586,7 +586,7 @@ function bandLabel(b) {
 	var n = bandNo(b);
 
 	if (n === null)
-		return _('raw') + ' ' + bandRaw(b);
+		return _('raw', 'fm160 raw marker') + ' ' + bandRaw(b);
 	if (b.rat === 9)
 		return 'n' + n;
 	return 'B' + n;

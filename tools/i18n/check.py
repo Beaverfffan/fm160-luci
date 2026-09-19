@@ -713,6 +713,57 @@ def translation_call_is_split(mk):
     return not m.group(1).rstrip().endswith(')')
 
 
+def gui_po_files(luci):
+    """Every zh_Hans catalogue in a luci checkout, luci-base included.
+
+    Deliberately not just luci-base.  load_catalog() merges EVERY *.zh-cn.lmo
+    in the i18n directory into one namespace, so the question a context has to
+    answer is "does any installed catalogue translate this bare msgid
+    differently", and luci-base is one of ninety-odd.  Asking only luci-base
+    gets the answer wrong in both directions -- it calls 'up' decoration when
+    35 other catalogues carry it, and it never sees the collisions in 'raw',
+    'on', 'Number', 'Age' or 'Altitude' at all.
+
+    This over-approximates: a luci checkout carries apps this device does not
+    have installed, so a context may be kept for a collision that would not
+    happen.  That is the cheap direction to be wrong in -- an unnecessary
+    context costs one distinct key, a missed collision is a reader resolving
+    somebody else's translation into our page.
+    """
+    out = []
+    for dp, dns, fns in os.walk(luci):
+        dns[:] = [d for d in dns if d != '.git']
+        here = dp.replace('\\', '/')
+        if not here.endswith('po/zh_Hans'):
+            continue
+        if 'luci-app-fm160' in here:
+            # Our own catalogue.  Sharing a msgid with itself proves nothing
+            # and would make every context look justified.
+            continue
+        for f in sorted(fns):
+            if f.endswith('.po'):
+                out.append(os.path.join(dp, f))
+    return sorted(out)
+
+
+def bare_translations(entries):
+    """msgid -> the set of translations for it, over entries that carry a key.
+
+    Only bare (context-free, non-plural) entries: a contexted entry keys on
+    ctxt \\x01 msgid, which is not the key a bare lookup in another app uses.
+    An entry whose msgstr equals its msgid stores no key at all, because
+    po2lmo never writes one, so it is evidence of nothing either.
+    """
+    out = {}
+    for e in entries:
+        if e['ctxt'] is not None or e['plural']:
+            continue
+        if e['msgstr'] == e['msgid']:
+            continue
+        out.setdefault(canon(e['msgid']), set()).add(e['msgstr'])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--repo', default=None)
@@ -837,15 +888,22 @@ def main():
     # the whole front end.  A file that grows a new string is the one case
     # these floors cannot see, and that case is caught by the coverage section
     # at the end, which fails on any message the po does not carry.
+    #
+    # dial.js and usb.js used to be one file.  Splitting a page moves strings
+    # between files without changing a single po key -- the po is keyed by
+    # (msgid, context), not by file -- so the floors are the only thing here
+    # that has to be told, and they are set from the real extraction, not by
+    # splitting the old number.
     JS_SOURCES = [
         ('fm160/api.js',          53),
         ('view/fm160/cells.js',   73),
         ('view/fm160/debug.js',   21),
-        ('view/fm160/dial.js',   102),
+        ('view/fm160/dial.js',    54),
         ('view/fm160/gnss.js',   101),
         ('view/fm160/overview.js', 54),
         ('view/fm160/signal.js',  15),
         ('view/fm160/sms.js',     97),
+        ('view/fm160/usb.js',     57),
     ]
     menu_json = os.path.join(pkg, 'root', 'usr', 'share', 'luci', 'menu.d',
                              'luci-app-fm160.json')
@@ -1057,6 +1115,11 @@ def main():
     # lmo_iterate (lmo.c:607) with last-write-wins.  A shared key whose
     # translation differs is therefore a visible coin toss: the server-rendered
     # string and the browser-resolved string can disagree.
+    #
+    # luci-base is reported on by name because it is the catalogue that is
+    # always installed, so a disagreement with it is the one a reader is
+    # guaranteed to be able to hit.  The policy below is stricter than that
+    # baseline and runs over every catalogue in the tree; see gui_po_files().
     rep.section('cross-catalogue collisions')
     if not args.luci:
         rep.skip('collision check against luci-base', 'no --luci checkout')
@@ -1118,34 +1181,52 @@ def main():
 
             # The policy, both directions, so that a context is neither missing
             # where it is needed nor present where it is decoration.  `ours`
-            # above is keyed with contexts; this asks what a BARE lookup in
-            # luci-base would find for each of our msgids.
-            bare_theirs = {}
-            for e in base_entries:
-                if e['ctxt'] is None and not e['plural'] and e['msgstr'] != e['msgid']:
-                    bare_theirs.setdefault(canon(e['msgid']), e['msgstr'])
+            # above is keyed with contexts; this asks what a BARE lookup would
+            # find -- and "what it would find" is every catalogue the device
+            # will merge, not the one that happens to be easiest to name.
+            pool = {}
+            cats = gui_po_files(args.luci)
+            unreadable = []
+            for p in cats:
+                try:
+                    _h, es = parse_po(p, allow_plural=True)
+                except ValueError as ex:
+                    unreadable.append('%s (%s)' % (os.path.relpath(p, args.luci), ex))
+                    continue
+                for k, vs in bare_translations(es).items():
+                    pool.setdefault(k, set()).update(vs)
+            rep.ok('collision pool: %d catalogues, %d distinct bare keys'
+                   % (len(cats) - len(unreadable), len(pool)))
+            if unreadable:
+                # A catalogue this parser cannot model narrows the pool, and a
+                # narrowed pool is how a real collision goes unnoticed.
+                rep.warn('these catalogues could not be read, so the pool is '
+                         'missing them', '\n'.join(unreadable[:8]))
 
             unescaped = []      # collides and differs, but carries no context
             decorative = []     # carries a context, but has nothing to escape
             for e in entries:
-                bare = canon(e['msgid'])
-                if bare not in bare_theirs:
+                vals = pool.get(canon(e['msgid']))
+                if vals is None:
                     if e['ctxt'] is not None:
                         decorative.append((e['msgid'], e['ctxt']))
                     continue
-                if bare_theirs[bare] != e['msgstr'] and e['ctxt'] is None:
-                    unescaped.append((e['msgid'], e['msgstr'], bare_theirs[bare]))
-            rep.check('every shared msgid that luci-base translates differently '
-                      'carries a context',
+                if e['ctxt'] is None and e['msgstr'] not in vals:
+                    unescaped.append((e['msgid'], e['msgstr'], sorted(vals)))
+            rep.check('every shared msgid that some luci catalogue translates '
+                      'differently carries a context',
                       not unescaped,
-                      '\n'.join('%r: ours %r, luci-base %r -- add a second '
-                                "argument to _() and a msgctxt to the po"
-                                % u for u in unescaped[:8]))
+                      '\n'.join('%r: ours %r, another catalogue has %r -- add a '
+                                'second argument to _() and a msgctxt to the '
+                                'po, or rename it if it is a menu title (a '
+                                'title has no _() call to carry a context)'
+                                % (u[0], u[1], u[2][:3]) for u in unescaped[:8]))
             rep.check('a context is only used where the bare msgid really '
                       'collides',
                       not decorative,
-                      '\n'.join('%r (context %r) is not shared with luci-base, '
-                                'so the context escapes nothing' % d
+                      '\n'.join('%r (context %r) is not shared with any of the '
+                                '%d catalogues, so the context escapes nothing'
+                                % (d[0], d[1], len(cats) - len(unreadable))
                                 for d in decorative[:8]))
             if diff:
                 rep.warn('shared keys with a different translation in luci-base',

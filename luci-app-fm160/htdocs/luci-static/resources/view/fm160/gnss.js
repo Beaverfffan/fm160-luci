@@ -193,7 +193,7 @@ return view.extend({
 
 		body.appendChild(E('p', {}, [
 			E('strong', {}, _('Engine:') + ' '),
-			e.known ? (e.on ? _('on') : _('off', 'fm160 off state')) : _('not read yet'),
+			e.known ? (e.on ? _('on', 'fm160 on state') : _('off', 'fm160 off state')) : _('not read yet'),
 			' ',
 			btn
 		]));
@@ -234,11 +234,11 @@ return view.extend({
 
 		rows.push(row(_('Latitude'), api.gnssLat(state)));
 		rows.push(row(_('Longitude'), api.gnssLon(state)));
-		rows.push(row(_('Altitude'), api.reported(f.alt_dm) ? (f.alt_dm / 10).toFixed(1) + ' m' : '-'));
+		rows.push(row(_('Altitude', 'fm160 gnss field'), api.reported(f.alt_dm) ? (f.alt_dm / 10).toFixed(1) + ' m' : '-'));
 		rows.push(row(_('Geoid separation'), api.reported(f.geoid_dm) ? (f.geoid_dm / 10).toFixed(1) + ' m' : '-'));
 
 		var kmh = api.gnssSpeedKmh(state);
-		rows.push(row(_('Speed', 'fm160 gnss field'), kmh === null ? '-' : kmh.toFixed(1) + ' km/h'));
+		rows.push(row(_('Speed'), kmh === null ? '-' : kmh.toFixed(1) + ' km/h'));
 		rows.push(row(_('Course'), api.reported(f.course_d10) ? (f.course_d10 / 10).toFixed(1) + '\u00b0' : '-'));
 		rows.push(row(_('Quality'), api.reported(f.quality) ? api.gnssQualityName(f.quality) : '-'));
 		rows.push(row(_('UTC'), f.utc || '-'));
@@ -371,7 +371,7 @@ return view.extend({
 		if (c.unknown)
 			rows.push(row(_('Unrecognised entries'), c.unknown));
 		if (c.age_ms !== undefined)
-			rows.push(row(_('Age'), api.fmtAge(c.age_ms)));
+			rows.push(row(_('Age', 'fm160 gnss field'), api.fmtAge(c.age_ms)));
 
 		body.appendChild(E('table', { 'class': 'table' }, rows));
 
