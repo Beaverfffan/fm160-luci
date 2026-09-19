@@ -131,9 +131,9 @@ void fm160_state_init(void)
 	g_state.enabled = true;
 
 	/* M5.  Every field the modem leaves EMPTY while there is no fix is seeded
-	 * with FM160_NONE rather than 0, so a page cannot tell "0 satellites used"
-	 * apart from "the modem had nothing to report" -- see the notes above
-	 * struct fm160_gnss_reading. */
+	 * with FM160_NONE rather than 0, so that a page CAN tell "0 satellites
+	 * used" apart from "the modem had nothing to report" -- see the notes
+	 * above struct fm160_gnss_reading. */
 	g_state.gnss.cfg.supl_version = FM160_NONE;
 	g_state.gnss.cfg.constellation = FM160_NONE;
 	g_state.gnss.cfg.cert = FM160_NONE;
@@ -150,6 +150,14 @@ void fm160_state_init(void)
 	g_state.gnss.r.course_d10 = FM160_NONE;
 	g_state.gnss.r.snr_best_db = FM160_NONE;
 	g_state.gnss.r.gsv_trailing_value = FM160_NONE;
+	/* visible_total too.  It is a SUM of what the GSV lines claim, so 0 is a
+	 * perfectly ordinary measurement indoors - and that is exactly why it must
+	 * not also be the value of "no reading has been taken yet".  Left at 0 by
+	 * the zero-initialisation, the page says "engine on, 0 satellites in view"
+	 * in the window between switching the engine on and the first NMEA tier
+	 * answer, which is a claim about the sky that nothing has looked at.  The
+	 * fix table already renders the sentinel as '-'; this makes it arrive. */
+	g_state.gnss.r.visible_total = FM160_NONE;
 	dirty = true;
 }
 

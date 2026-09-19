@@ -732,7 +732,15 @@ function gnssStateText(st) {
 		       ' ' + _('empty answers in a row') + ')';
 	if (r.empty_frames === 1)
 		return _('engine on, still starting up') + ' (' + _('one empty answer') + ')';
-	if (!reported(f.visible) || f.visible === 0)
+	/* "not reported" and "0" are different answers and must not be folded into
+	 * one sentence.  0 is a measurement - and the normal one indoors - whereas
+	 * the sentinel means nothing has been read yet, which is the real state in
+	 * the window between switching the engine on and the first NMEA answer
+	 * arriving.  Saying "0 satellites in view" there would be asserting a fact
+	 * about the sky that nothing has looked at. */
+	if (!reported(f.visible))
+		return _('engine on, waiting for the first reading');
+	if (f.visible === 0)
 		return _('engine on, 0 satellites in view - normal indoors');
 	return _('engine on') + ', ' + f.visible + ' ' + _('in view, no fix yet');
 }
