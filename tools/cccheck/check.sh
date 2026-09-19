@@ -26,6 +26,15 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 SRC="$ROOT/fm160d/src"
 
+# A directory in the form the native binaries here can open: C:/x on MSYS,
+# unchanged on a POSIX host.  `pwd -W` is an MSYS extension, so a plain Linux
+# shell has to fall through to the path it was given rather than to cygpath
+# (which does not exist there, and whose absence used to print an error into
+# the middle of the build log).
+winpath() {
+	(cd "$1" 2>/dev/null && pwd -W 2>/dev/null) || printf '%s' "$1"
+}
+
 # --- Windows path pitfalls -------------------------------------------------
 #  1. zig resolves its caches via HOME, and MSYS hands out /c/... paths that
 #     zig cannot read.  Symptom: "error: CacheCheckFailed" on every file.
@@ -33,9 +42,23 @@ SRC="$ROOT/fm160d/src"
 #     intermediate artefacts ("error: FileNotFound" at the main file).
 #     => run from the workspace root and pass relative paths, and give zig
 #     Windows-style cache dirs it can actually open.
-HERE_W=$(cd "$HERE" && pwd -W 2>/dev/null || cygpath -m "$HERE")
+HERE_W=$(winpath "$HERE")
 REL_SRC="fm160d/src"
 REL_INC="tools/cccheck/include"
+
+# --- locate python -------------------------------------------------------
+# The removal helpers below are python because this sandbox intercepts `rm` and
+# kills the script with SIGTERM.  The interpreter is `python` on the Windows
+# workstation and `python3` on the build host, where `python` does not exist at
+# all -- resolving it once is the difference between the gate running there and
+# the gate reporting "python: command not found" as a compile failure.
+if [ -z "${PY:-}" ]; then
+	PY=$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)
+fi
+if [ -z "${PY:-}" ]; then
+	echo "no python on PATH -- set PY=" >&2
+	exit 2
+fi
 
 # --- locate a C compiler ------------------------------------------------
 # `zig cc` is a clang front end that ships full musl headers, so our code and
@@ -44,7 +67,7 @@ REL_INC="tools/cccheck/include"
 # that is first on PATH (`pip install ziglang`), then plain `zig`.
 if [ -z "${ZIG:-}" ]; then
 	# 1. whatever python is first on PATH, if it has the wheel.
-	ZIG=$(python -c "
+	ZIG=$("$PY" -c "
 import os, sys
 try:
     import ziglang
@@ -100,7 +123,7 @@ fi
 # zig resolves its caches through HOME, and MSYS hands out /c/... paths that
 # zig (a Windows binary) cannot read: symptom "error: CacheCheckFailed" on
 # every file.  Convert HOME to a Windows-style path when we can.
-HOME_W=$(cd "$HOME" 2>/dev/null && pwd -W 2>/dev/null || printf '%s' "$HOME")
+HOME_W=$(winpath "$HOME")
 export HOME="$HOME_W"
 export ZIG_GLOBAL_CACHE_DIR="$HERE_W/.zigcache/g"
 export ZIG_LOCAL_CACHE_DIR="$HERE_W/.zigcache/l"
@@ -123,7 +146,7 @@ fail=0
 # removals go through Python.  (Symptom if you use rm: no output at all and
 # exit code 1 / signal SIGTERM.)
 del() {
-	python -c "
+	"$PY" -c "
 import os, sys
 for p in sys.argv[1:]:
     try:
@@ -136,10 +159,11 @@ for p in sys.argv[1:]:
 # Start from an empty output directory.  Stale .o files from an earlier run
 # would otherwise be fed to symcheck and report a symbol table that no longer
 # corresponds to the sources.
-# NB: this python.exe is a *Windows* binary, and MSYS hands out /c/... paths
-# that Windows resolves against the current drive (-> C:\c\...).  Anything
-# passed to python must be a Windows-style path, hence $OUT_W here.
-python -c "
+# NB: on Windows this python.exe is a *Windows* binary, and MSYS hands out
+# /c/... paths that Windows resolves against the current drive (-> C:\c\...).
+# Anything passed to python there must be a Windows-style path, hence $OUT_W,
+# which winpath() leaves alone on a POSIX host.
+"$PY" -c "
 import os, sys
 d = sys.argv[1]
 for f in os.listdir(d):
@@ -189,14 +213,14 @@ del "$OUT_W/hdr_check.c"
 # and FM160_VERSION drifting from PKG_VERSION.  Both are cross-file facts that
 # the compile above cannot see, and both fail somewhere other than here.
 if [ "$fail" = 0 ]; then
-	mkout=$(python "$HERE_W/makecheck.py" 2>&1)
+	mkout=$("$PY" "$HERE_W/makecheck.py" 2>&1)
 	mkrc=$?
 	echo "$mkout"
 	[ "$mkrc" = 0 ] || fail=1
 fi
 
 if [ "$fail" = 0 ]; then
-	symout=$(python "$HERE_W/symcheck.py" "$OUT_W" 2>&1)
+	symout=$("$PY" "$HERE_W/symcheck.py" "$OUT_W" 2>&1)
 	symrc=$?
 	echo "$symout"
 	[ "$symrc" = 0 ] || fail=1
@@ -207,7 +231,7 @@ fi
 # "/bin/sh /etc/rc.common\r".  Cheap to check, very expensive to debug.
 # Relative paths only for python - see the note about $OUT_W above.
 if [ "$fail" = 0 ]; then
-	python "$HERE_W/eolcheck.py" . || fail=1
+	"$PY" "$HERE_W/eolcheck.py" . || fail=1
 fi
 
 # The front end has no compile step whatsoever, so a LuCI view with a missing

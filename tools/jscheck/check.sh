@@ -17,7 +17,9 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-HERE_W=$(cd "$HERE" && pwd -W 2>/dev/null || cygpath -m "$HERE")
+# `pwd -W` is an MSYS extension and cygpath does not exist on a POSIX host, so
+# the fallback is the path we were given rather than a second conversion tool.
+HERE_W=$((cd "$HERE" && pwd -W 2>/dev/null) || printf '%s' "$HERE")
 
 VIEWS="$ROOT/luci-app-fm160/htdocs"
 # Windows-style twin of VIEWS: the python and node in use are Windows

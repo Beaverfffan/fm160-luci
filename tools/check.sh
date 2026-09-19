@@ -64,6 +64,19 @@ warn_skip() {
 	return 0
 }
 
+# A gate can also run and still leave something unproven: the translation check
+# prints 66 assertions and then reports SKIPPED for the two sections that need
+# an upstream luci tree.  That is not a gate that did not run, and naming it in
+# the "gates not run" line beside a real omission (the host-side C test) reads
+# as though the 66 assertions never happened -- the same disappearance the
+# header warns about.  STRICT still fails: a section that could not run has
+# proved nothing either, it is just reported as what it is.
+note_skip() {
+	printf '  SKIPPED: %s\n' "$1"
+	[ -n "${STRICT:-}" ] && fail=1
+	return 0
+}
+
 # --- the C, symbol, EOL and front-end gates ------------------------------
 note "tools/cccheck/check.sh"
 if sh "$HERE/cccheck/check.sh"; then
@@ -114,7 +127,7 @@ PO2LMO=
 if [ -z "${LUCI:-}" ]; then
 	# The check still runs, and still reports SKIPPED for the two sections that
 	# need an upstream tree; it just has nothing to compare against.
-	warn_skip "set LUCI=<luci checkout> to enable the cbi.js and collision checks" i18n
+	note_skip "set LUCI=<luci checkout> to enable the cbi.js and collision checks"
 else
 	LUCI_ARG=$(wpath "$LUCI")
 	# The end-to-end section needs a po2lmo, and the only trustworthy one is
@@ -128,10 +141,10 @@ else
 			PO2LMO="$ROOT/_tmp/i18n/po2lmo"
 			[ -n "${MSYSTEM:-}" ] && PO2LMO="$PO2LMO.exe"
 		else
-			warn_skip "po2lmo did not build" po2lmo
+			note_skip "po2lmo did not build"
 		fi
 	else
-		warn_skip "no modules/luci-base/src under $LUCI" po2lmo
+		note_skip "no modules/luci-base/src under $LUCI"
 	fi
 fi
 
