@@ -278,6 +278,21 @@ struct fm160_ca_state {
 #define FM160_GNSS_CAP_MAX    32   /* values in one AT+GTGPSCFG=? answer */
 
 /*
+ * AT+GTGPSCFG= takes an "x" that names which field is being written, and the
+ * capability answer gives each x its own value set.  The sets are NOT
+ * interchangeable, so they are kept apart - one slot per x, plus one for a
+ * group that arrived with no "GTGPSCFG: x" header in front of it at all.
+ *
+ * The unkeyed slot exists so that an answer this parser cannot attribute is
+ * still visible in the log instead of vanishing, but it never licenses a write:
+ * a value with no field attached has no meaning to check against.
+ */
+#define FM160_GNSS_CFG_X_MAX   4   /* the x values AT+GTGPSCFG can take       */
+#define FM160_GNSS_CFG_X_NONE  4   /* slot for groups with no x in front      */
+#define FM160_GNSS_CFG_SLOTS   5   /* four fields plus the unkeyed slot       */
+#define FM160_GNSS_CFG_X_WRITE 2   /* the x that AT+GTGPSCFG=2,<v> writes     */
+
+/*
  * NMEA talker prefixes - a LABEL, never a switch.
  *
  * The prefix identifies a constellation but nothing downstream may depend on
@@ -431,17 +446,33 @@ struct fm160_gnss_cfg {
 	/*
 	 * The licence for AT+GTGPSCFG=2,<v>.
 	 *
-	 * ⚠️ The modem's AT+GTGPSCFG=? answer was never measured.  The manual
-	 * shows a four-group list, but assuming that layout is exactly the guess
-	 * this project refuses to make, so every value in the answer is collected
-	 * into one flat list and the write path requires the value to appear BOTH
-	 * here and in the manual's set for x=2.  Too strict is the safe
-	 * direction: it can refuse a legal value, never accept an illegal one.
+	 * MEASURED on the FM160 (2026-09-19), AT+GTGPSCFG=? answers one line per
+	 * field and each line carries its own value set:
+	 *
+	 *     +GTGPSCFG: 0,(0-2)     supl version  - three values
+	 *     +GTGPSCFG: 2,(0-15)    constellation - sixteen
+	 *     +GTGPSCFG: 3,(0,1)
+	 *
+	 * and x=1 is absent here too, exactly as in the "?" form.  The sets are not
+	 * interchangeable, so they are stored per x and the write path asks only
+	 * about FM160_GNSS_CFG_X_WRITE.
+	 *
+	 * The first version of this parser flattened every group into one list.  On
+	 * this firmware that produced the right answer by luck - x=2's set happens
+	 * to be a superset of the other two, so the union equalled it - while
+	 * actually asking "is this value legal for ANY field?".  A firmware that
+	 * made some other field the wider one would have licensed writes the modem
+	 * rejects, and the check would have looked like it was working the whole
+	 * time.  A coincidence is not a check.
+	 *
+	 * caps_valid means the x=2 set is known, which is exactly the licence the
+	 * write needs.
 	 */
 	bool caps_valid;
-	int  caps_values[FM160_GNSS_CAP_MAX];
-	int  caps_n;
-	int  caps_groups;
+	int  caps_n[FM160_GNSS_CFG_SLOTS];
+	int  caps_values[FM160_GNSS_CFG_SLOTS][FM160_GNSS_CAP_MAX];
+	int  caps_x_mask;              /* bit x: a line for that x did arrive    */
+	int  caps_groups;              /* answers seen, for the log             */
 };
 
 /* AT+GTGPSEPO? / AT+GTAGPSSERV? - read-only in this milestone. */

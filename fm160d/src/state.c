@@ -704,12 +704,44 @@ struct blob_buf *fm160_state_blob(void)
 		t = blobmsg_open_table(&b, "config_caps");
 		blobmsg_add_u8(&b, "valid", g_state.gnss.cfg.caps_valid);
 		blobmsg_add_u32(&b, "groups", (uint32_t)g_state.gnss.cfg.caps_groups);
+		blobmsg_add_u32(&b, "write_x", (uint32_t)FM160_GNSS_CFG_X_WRITE);
+		blobmsg_add_u32(&b, "x_mask", (uint32_t)g_state.gnss.cfg.caps_x_mask);
+		/* "values" is the x=2 set, which is the one a write is checked
+		 * against.  The other fields' sets follow in "by_x" because they
+		 * genuinely differ - x=0 is (0-2) on this modem - and a page that
+		 * displayed their union as the constellation's list would be
+		 * quoting some other field's answer. */
 		{
 			void *arr = blobmsg_open_array(&b, "values");
 
-			for (k = 0; k < g_state.gnss.cfg.caps_n; k++)
-				blobmsg_add_u32(&b, NULL,
-						(uint32_t)g_state.gnss.cfg.caps_values[k]);
+			for (k = 0;
+			     k < g_state.gnss.cfg.caps_n[FM160_GNSS_CFG_X_WRITE];
+			     k++)
+				blobmsg_add_u32(&b, NULL, (uint32_t)
+						g_state.gnss.cfg.caps_values
+						[FM160_GNSS_CFG_X_WRITE][k]);
+			blobmsg_close_array(&b, arr);
+		}
+		{
+			void *arr = blobmsg_open_array(&b, "by_x");
+			int x;
+
+			for (x = 0; x < FM160_GNSS_CFG_SLOTS; x++) {
+				void *row, *v;
+				int n = g_state.gnss.cfg.caps_n[x];
+
+				if (!n)
+					continue;
+				row = blobmsg_open_table(&b, NULL);
+				blobmsg_add_u32(&b, "x", (uint32_t)x);
+				v = blobmsg_open_array(&b, "values");
+				for (k = 0; k < n; k++)
+					blobmsg_add_u32(&b, NULL, (uint32_t)
+							g_state.gnss.cfg
+							.caps_values[x][k]);
+				blobmsg_close_array(&b, v);
+				blobmsg_close_table(&b, row);
+			}
 			blobmsg_close_array(&b, arr);
 		}
 		blobmsg_close_table(&b, t);

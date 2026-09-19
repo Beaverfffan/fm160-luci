@@ -651,10 +651,13 @@ function caCellSummary(c) {
  *   Zero is NOT a sentinel - "0 satellites in view" is a measurement, while an
  *   absent elevation is the absence of one.
  *
- *   The capability answer is the licence to write.  AT+GTGPSCFG=? has never
- *   been observed on this hardware, so fm160d parses it without assuming any
- *   layout and may come back with a set narrower than reality.  A page that
- *   ignores config_caps.valid offers buttons the daemon will refuse.
+ *   The capability answer is the licence to write, and it is answered one field
+ *   at a time: AT+GTGPSCFG=? returns a line per x, each with its own value set
+ *   (measured 2026-09-19 - x=0 is (0-2), x=2 is (0-15), x=3 is (0,1), x=1
+ *   absent).  fm160d keeps them apart and licenses the constellation write from
+ *   the x=2 set alone, so config_caps.values is exactly that set rather than a
+ *   union of the three.  A page that ignores config_caps.valid offers buttons
+ *   the daemon will refuse.
  */
 
 function gnssOf(st)        { return (st && st.gnss) || {}; }
@@ -663,6 +666,22 @@ function gnssReadOf(st)    { return gnssOf(st).read    || {}; }
 function gnssFixOf(st)     { return gnssOf(st).fix     || {}; }
 function gnssCfgOf(st)     { return gnssOf(st).config  || {}; }
 function gnssCfgCapsOf(st) { return gnssOf(st).config_caps || {}; }
+/*
+ * The per-field value sets as the modem reported them: [{ x, values }, ...].
+ * x reads as the field number in AT+GTGPSCFG=x,<v>; the daemon's slot for a
+ * group that arrived with no field name is FM160_GNSS_CFG_X_NONE, which it
+ * publishes as 4 so that a page can tell it apart from a real field.
+ */
+function gnssCfgCapsByX(st) { return gnssCfgCapsOf(st).by_x || []; }
+
+/* Which field AT+GTGPSCFG=2,<v> writes, i.e. the one config_caps.values is
+ * about.  Taken from the snapshot rather than hardcoded, so the page and the
+ * daemon cannot disagree if the daemon's target ever changes. */
+function gnssCfgWriteX(st) {
+	var v = gnssCfgCapsOf(st).write_x;
+
+	return (typeof v === 'number') ? v : 2;
+}
 function gnssAgpsOf(st)    { return gnssOf(st).agps    || {}; }
 function gnssConstsOf(st)  { return gnssOf(st).constellations || []; }
 function gnssSatsOf(st)    { return gnssOf(st).satellites || []; }
@@ -971,6 +990,8 @@ return baseclass.extend({
 	gnssLon: fmtLon,
 	gnssCfgLabel: gnssCfgLabel,
 	gnssCfgChoices: gnssCfgChoices,
+	gnssCfgCapsByX: gnssCfgCapsByX,
+	gnssCfgWriteX: gnssCfgWriteX,
 	gnssFixTypeName: gnssFixTypeName,
 	gnssQualityName: gnssQualityName,
 	gnssDop: gnssDop,

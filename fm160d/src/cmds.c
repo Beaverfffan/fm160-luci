@@ -753,6 +753,11 @@ void fm160_ident_reset(void)
 	g_state.gtact_caps.valid = false;
 	g_state.celllock_caps.valid = false;
 	g_state.gnss.cfg.caps_valid = false;
+	/* The sets go too, not just the licence: the snapshot publishes them and
+	 * the page draws a value list from them, so a licence reset that left the
+	 * old lists behind would show the previous module's answer as current. */
+	memset(g_state.gnss.cfg.caps_n, 0, sizeof(g_state.gnss.cfg.caps_n));
+	g_state.gnss.cfg.caps_x_mask = 0;
 
 	/* The autostart wish gets one attempt per ident run.  Resetting it here
 	 * rather than never means a module that was power-cycled - the one case
@@ -2614,56 +2619,113 @@ static int gnss_cap_expand(const char *group, int *out, int max)
 }
 
 /*
+ * The x in "GTGPSCFG: 2,(0-15)" names the field the group belongs to.
+ *
+ * It is read from the header rather than from the line's position, because the
+ * modem omits x=1 entirely: a positional reading would shift x=3's set onto
+ * x=2, which is precisely the field the write path uses.  A line with no header
+ * at all returns FM160_GNSS_CFG_X_NONE - the values are still kept and logged,
+ * but they cannot license anything.
+ */
+static int gnss_cfg_slot_of(const char *line)
+{
+	const char *h = strstr(line, "GTGPSCFG");
+	const char *c, *p;
+
+	if (!h)
+		return FM160_GNSS_CFG_X_NONE;
+	c = strchr(h, ':');
+	if (!c)
+		return FM160_GNSS_CFG_X_NONE;
+
+	p = c + 1;
+	while (*p == ' ' || *p == '\t')
+		p++;
+	if (*p < '0' || *p > '9')
+		return FM160_GNSS_CFG_X_NONE;
+
+	{
+		int x = atoi(p);
+
+		return (x >= 0 && x < FM160_GNSS_CFG_X_MAX) ? x :
+		       FM160_GNSS_CFG_X_NONE;
+	}
+}
+
+/*
  * AT+GTGPSCFG=? -> the licence for the constellation write.
  *
- * ⚠️ This answer was NEVER measured.  The guide prints a four-group list for it,
- * but the same guide's "=? response head" column is wrong for two other commands
- * in the same table (AT-FACTS 10.6), and the module already proved it does not
- * report all four groups in the "?" form.  So the layout is not assumed: every
- * parenthesised group is split with the helper the M4 parser uses, every integer
- * found anywhere goes into one flat list, and the write path then requires the
- * value to be in THAT list and in the guide's set for x=2.  The intersection can
- * only ever be too strict, which is the safe direction for a persistent write.
+ * Measured 2026-09-19 (AT-FACTS 10.6): the answer is one line per field, each
+ * carrying its own value set, and the sets genuinely differ - x=0 is (0-2)
+ * while x=2 is (0-15).  Each line is therefore attributed to its x and stored
+ * on its own, and the write path checks fm160_gnss_cfg_x_write and nothing
+ * else.  (fm160d.h records why the flattened, union-of-everything version that
+ * came before was wrong even where it happened to give the right answer.)
  */
 void fm160_parse_gnss_cfg_caps(const char *resp)
 {
-	char groups[8][FM160_RESP_LINE_MAX];
 	struct fm160_gnss_cfg *cfg = &g_state.gnss.cfg;
 	const char *p;
-	int ng, i, k;
+	int lines = 0, i, k;
 
 	if (!resp)
 		return;
-	p = strstr(resp, "+GTGPSCFG");
-	if (!p)
-		p = resp;
 
-	ng = split_groups(p, groups, ARRAY_SIZE(groups));
-
-	cfg->caps_n = 0;
+	memset(cfg->caps_n, 0, sizeof(cfg->caps_n));
 	memset(cfg->caps_values, 0, sizeof(cfg->caps_values));
-	cfg->caps_groups = ng;
+	cfg->caps_x_mask = 0;
+	cfg->caps_groups = 0;
 
-	for (i = 0; i < ng; i++) {
-		int vals[FM160_GNSS_CAP_MAX];
-		int n = gnss_cap_expand(groups[i], vals, ARRAY_SIZE(vals));
+	for (p = resp; *p; ) {
+		const char *eol = strpbrk(p, "\r\n");
+		char line[FM160_RESP_LINE_MAX];
+		char groups[4][FM160_RESP_LINE_MAX];
+		size_t len = eol ? (size_t)(eol - p) : strlen(p);
+		int slot, ng;
 
-		for (k = 0; k < n; k++) {
-			int j;
-			bool dup = false;
+		if (len >= sizeof(line))
+			len = sizeof(line) - 1;
+		memcpy(line, p, len);
+		line[len] = '\0';
+		p = eol ? eol + strspn(eol, "\r\n") : p + strlen(p);
 
-			for (j = 0; j < cfg->caps_n; j++)
-				if (cfg->caps_values[j] == vals[k])
-					dup = true;
-			if (!dup && cfg->caps_n < FM160_GNSS_CAP_MAX)
-				cfg->caps_values[cfg->caps_n++] = vals[k];
+		/* Only lines that carry a group are answers. */
+		if (!strchr(line, '('))
+			continue;
+
+		lines++;
+		slot = gnss_cfg_slot_of(line);
+		if (slot < FM160_GNSS_CFG_X_MAX)
+			cfg->caps_x_mask |= 1 << slot;
+
+		ng = split_groups(line, groups, ARRAY_SIZE(groups));
+		for (i = 0; i < ng; i++) {
+			int vals[FM160_GNSS_CAP_MAX];
+			int n = gnss_cap_expand(groups[i], vals, ARRAY_SIZE(vals));
+
+			for (k = 0; k < n; k++) {
+				int j;
+				bool dup = false;
+
+				for (j = 0; j < cfg->caps_n[slot]; j++)
+					if (cfg->caps_values[slot][j] == vals[k])
+						dup = true;
+				if (!dup && cfg->caps_n[slot] < FM160_GNSS_CAP_MAX)
+					cfg->caps_values[slot][cfg->caps_n[slot]++] = vals[k];
+			}
 		}
 	}
 
-	cfg->caps_valid = cfg->caps_n > 0;
-	fm160_log(LOG_INFO, "GNSS config caps: %d value(s) in %d group(s) - %s",
-		  cfg->caps_n, ng, cfg->caps_valid ? "writing is licensed" :
-		  "no value list, writing stays disabled");
+	cfg->caps_groups = lines;
+	/* The licence covers the field the write targets, and nothing else. */
+	cfg->caps_valid = cfg->caps_n[FM160_GNSS_CFG_X_WRITE] > 0;
+
+	fm160_log(LOG_INFO,
+		  "GNSS config caps: x0=%d x1=%d x2=%d x3=%d unkeyed=%d (%d line(s)) - %s",
+		  cfg->caps_n[0], cfg->caps_n[1], cfg->caps_n[2], cfg->caps_n[3],
+		  cfg->caps_n[FM160_GNSS_CFG_X_NONE], lines,
+		  cfg->caps_valid ? "writing is licensed" :
+		  "no set for x=2, writing stays disabled");
 	fm160_state_mark_dirty();
 }
 
@@ -2841,18 +2903,19 @@ int fm160_cmd_set_gnss_cfg(int value, at_done_cb cb, void *arg)
 
 	if (!g_state.gnss.cfg.caps_valid) {
 		fm160_log(LOG_WARNING,
-			  "refusing to write GNSS config: AT+GTGPSCFG=? never enumerated");
+			  "refusing to write GNSS config: AT+GTGPSCFG=? gave no set for x=%d",
+			  FM160_GNSS_CFG_X_WRITE);
 		return -1;
 	}
 	if (fm160_gnss_cfg_command(cmd, sizeof(cmd), value))
 		return -1;
-	for (i = 0; i < g_state.gnss.cfg.caps_n; i++)
-		if (g_state.gnss.cfg.caps_values[i] == value)
+	for (i = 0; i < g_state.gnss.cfg.caps_n[FM160_GNSS_CFG_X_WRITE]; i++)
+		if (g_state.gnss.cfg.caps_values[FM160_GNSS_CFG_X_WRITE][i] == value)
 			listed = true;
 	if (!listed) {
 		fm160_log(LOG_WARNING,
-			  "refusing to write GNSS config %d: not in the modem's AT+GTGPSCFG=? answer",
-			  value);
+			  "refusing to write GNSS config %d: not in the x=%d set from AT+GTGPSCFG=?",
+			  value, FM160_GNSS_CFG_X_WRITE);
 		return -1;
 	}
 

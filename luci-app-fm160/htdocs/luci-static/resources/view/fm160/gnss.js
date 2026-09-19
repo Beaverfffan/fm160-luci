@@ -32,9 +32,12 @@
  *      common and very meaningful answer.
  *
  *   3. The satellite combination may only be offered from the intersection of
- *      the manual's values and the modem's own AT+GTGPSCFG=? answer.  That
- *      answer has never been observed on this hardware; if it is missing the
- *      control is disabled rather than guessed at.
+ *      the FM160 manual's values and the modem's own AT+GTGPSCFG=? answer, and
+ *      that answer describes each FIELD separately: measured 2026-09-19, x=0 is
+ *      (0-2) while x=2 is (0-15).  Only the x=2 set licenses the constellation
+ *      write, so this page offers x=2's values and shows the other fields' sets
+ *      as belonging to other settings - displaying their union as though it
+ *      were the combination list would quote a different field's answer.
  *
  * One thing about the polling: the NMEA tier in fm160d runs ONLY while a page
  * holds the foreground - with nothing watching, AT+GTGPS? would be a command
@@ -371,6 +374,32 @@ return view.extend({
 			rows.push(row(_('Age'), api.fmtAge(c.age_ms)));
 
 		body.appendChild(E('table', { 'class': 'table' }, rows));
+
+		/* AT+GTGPSCFG has several fields and the modem answers each one with
+		 * its own value set - on this unit x=0 is (0-2) while x=2, the
+		 * satellite combination, is (0-15).  The other fields are shown as
+		 * exactly that: another setting's range.  Folding them together into
+		 * one list would put values in front of the reader as combinations
+		 * when they describe a different setting altogether. */
+		var writeX = api.gnssCfgWriteX(state);
+		var others = api.gnssCfgCapsByX(state).filter(function(r) {
+			return r.x !== writeX;
+		});
+
+		if (others.length) {
+			body.appendChild(E('table', { 'class': 'table' }, others.map(function(r) {
+				return E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left' },
+						(r.x === 4)
+							? _('a group with no field name')
+							: _('field') + ' x=' + r.x),
+					E('td', { 'class': 'td left' },
+						(r.values || []).join(', '))
+				]);
+			})));
+			body.appendChild(E('p', { 'class': 'hint' },
+				_('The modem reports a separate value set for each field of AT+GTGPSCFG. Only x=%d is the satellite combination and only its set below can be written; the other fields are listed so that their numbers are not read as combinations.').format(writeX)));
+		}
 
 		var choices = api.gnssCfgChoices(state);
 
