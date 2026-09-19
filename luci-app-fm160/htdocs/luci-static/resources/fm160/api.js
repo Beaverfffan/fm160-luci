@@ -70,6 +70,49 @@ var callSmsRead   = rpc.declare({ object: 'fm160', method: 'sms_markread',
 var callSmsSync   = rpc.declare({ object: 'fm160', method: 'sms_sync',     expect: {} });
 
 /*
+ * M2: the data plane, and the USB profile switch.
+ *
+ * None of these defer.  A dial answers with the daemon's verdict and the link
+ * then comes up over the next seconds to minutes, so what a page watches is the
+ * "dial" table in the snapshot; a profile change answers once the write has
+ * been ACCEPTED, because the module re-enumerates for 30-90 s afterwards and no
+ * ubus request should be held open for that.  What a page watches there is the
+ * "modesw" table.
+ *
+ * dial_config is the only call here that writes to uci, and it writes on the
+ * daemon's side so that the file and the running configuration cannot drift:
+ * the alternative is a page that writes uci and then asks for a reload, with a
+ * window in between where the two disagree.  Values are validated before
+ * anything is stored, so a malformed APN cannot be saved and then discovered at
+ * the next dial.
+ */
+var callDialStart  = rpc.declare({ object: 'fm160', method: 'dial_start',  expect: {} });
+var callDialStop   = rpc.declare({ object: 'fm160', method: 'dial_stop',   expect: {} });
+var callDialConfig = rpc.declare({ object: 'fm160', method: 'dial_config',
+				   params: [ 'apn', 'pdp', 'cid', 'allow_reset',
+					     'autostart' ], expect: {} });
+/* On demand, not in the snapshot: fourteen static rows against a snapshot that
+ * is rebuilt whenever a sysfs counter moves. */
+var callProfiles   = rpc.declare({ object: 'fm160', method: 'profiles',    expect: {} });
+var callSetUsbMode = rpc.declare({ object: 'fm160', method: 'setusbmode',
+				   params: [ 'mode', 'advanced' ], expect: {} });
+
+/*
+ * M6.  The support bundle, as plain text.
+ *
+ * It is a read: the daemon builds it from the cached snapshot and its own log
+ * ring and never touches the modem, so asking for it cannot change the state it
+ * is describing.  The reply also carries a few scalars (the byte count, the log
+ * line count, how many lines were dropped) so a page can label the download
+ * without parsing the text.
+ *
+ * No params, and deliberately no "since" or "level" filter: the bundle is meant
+ * to be the same artefact every time, so that two of them can be compared.
+ */
+var callDiagnostics = rpc.declare({ object: 'fm160', method: 'diagnostics',
+				    expect: {} });
+
+/*
  * USB profiles.
  *
  * The dial-up document carries FOUR port tables, one per platform, and the same
@@ -177,16 +220,23 @@ var USB_MODE_BLACKLIST = [ 20, 24, 28, 31 ];
  *   0x0108 mode 21   absent   0x0110 mode 29   absent
  *   0x0109 mode 22   absent
  *
- * Of the modes this firmware offers, 21 and 29 are the ones where that matters,
- * because those two DO have an AT interface.  Switching to 29 would strand the
- * modem with no management channel at all -- the exact outcome this project
- * refuses to risk -- while mode 21 would leave the AT port on ttyUSB1 instead
- * of the usual ttyUSB2 and so be reachable only by hand.
+ * Of the modes this firmware offers, 21, 22 and 29 are the ones where that
+ * matters, because those three DO have an AT interface.  Switching to 29 or 22
+ * would strand the modem with no management channel at all -- the exact outcome
+ * this project refuses to risk -- while mode 21 would leave the AT port on
+ * ttyUSB1 instead of the usual ttyUSB2 and so be reachable only by hand.
+ *
+ * 22 was missing from this list until the M2 host-side test derived the set
+ * from the table instead of trusting it: the comment above had said "0109
+ * absent" all along, while the code let 22 through as merely 'advanced', i.e.
+ * offered behind a confirmation dialog that does not say the switch is
+ * one-way.  Keep this array equal to { mode : has_at && no option.c entry };
+ * 25-usbmode-dial-test.sh computes that set and fails if they differ.
  *
  * Clearing this list is a one-line kernel patch per PID; until that ships, the
  * UI must not offer these modes.
  */
-var USB_MODE_NO_KERNEL_DRIVER = [ 21, 29 ];
+var USB_MODE_NO_KERNEL_DRIVER = [ 21, 22, 29 ];
 
 /*
  * Hardware-verified mode set.
@@ -903,7 +953,7 @@ function gnssSpeedKmh(st) {
 	return reported(v) ? (v * 0.036) : null;
 }
 
-var GNSS_EPO_TEXT = { 0: _('off'), 1: 'MSB', 2: 'MSA' };
+var GNSS_EPO_TEXT = { 0: _('off', 'fm160 off state'), 1: 'MSB', 2: 'MSA' };
 
 function gnssEpoName(v) { return GNSS_EPO_TEXT[v] || ('EPO ' + v); }
 
@@ -1027,6 +1077,292 @@ function smsEstimate(text, maxParts) {
 	};
 }
 
+/*
+ * --- M2: the data plane ------------------------------------------------
+ *
+ * Two tables in the snapshot, kept apart because they fail differently.  "dial"
+ * describes how the link is dialled; "modesw" describes which physical USB
+ * profile the modem is in.  Only the second can take the management channel
+ * away, and that is why nothing below mixes them.
+ *
+ * Three rules shape the page that reads this:
+ *
+ *   1. fm160d dials ECM and only ECM.  A QMI or MBIM profile is dialled by the
+ *      kernel stack (uqmi / umbim) through netifd, and fm160_dial_start()
+ *      answers -ENOTSUP - "wrong-profile" - rather than pretending otherwise.
+ *      A page that offered Connect on a QMI profile would be offering a button
+ *      that can only fail.
+ *
+ *   2. Disconnect is AT+GTWWAN=0,<cid> and NOTHING else.  Unplugging the cable,
+ *      power-cycling the module and rebooting the router all leave the PDP
+ *      context active on the network side; that is the vendor's own red line
+ *      and the reason the page says so next to the button.
+ *
+ *   3. The verdict on a profile is the DAEMON's, not this file's.  fm160.profiles
+ *      returns each row already decided by fm160_usbmode_decide() - the same
+ *      function that guards the write - so a greyed-out row and a refusal
+ *      cannot disagree.  What is derived here is only the CATEGORY, for
+ *      grouping and colour.
+ */
+
+/* Mirrors enum fm160_net_step.  Used to name a state in prose, never to decide
+ * anything: every branch that acts on the step reads the string the daemon
+ * sent. */
+var NET_STEP = {
+	IDLE: 0, PIN: 1, REG: 2, APN: 3, ACTIVATE: 4,
+	IP: 5, UP: 6, BUSY: 7, FAILED: 8, DOWN: 9
+};
+
+/* Mirrors enum fm160_modesw_state. */
+var MODESW = {
+	IDLE: 0, CAPS: 1, APPLY: 2, VERIFY: 3, STUCK: 4
+};
+
+/* Mirrors enum fm160_usbmode_verdict.  The numbers are part of the wire
+ * contract with fm160d, so they are written out rather than inferred. */
+var USB_VERDICT = {
+	OK: 0, OK_SAME: 1,
+	DENY_UNKNOWN: 2, DENY_NO_AT: 3, DENY_NO_DRIVER: 4,
+	DENY_UNDOCUMENTED: 5, DENY_NOT_SUPPORTED: 6, DENY_LIST_UNKNOWN: 7
+};
+
+function dialOf(st)   { return (st && st.dial)   || {}; }
+function modeswOf(st) { return (st && st.modesw) || {}; }
+
+function dialUp(st)          { return !!dialOf(st).up; }
+function dialStep(st)        { return dialOf(st).step || 'unknown'; }
+function dialStepRaw(st)     { return dialOf(st).step_raw; }
+function dialUsable(st)      { return !!dialOf(st).usable; }
+function dialKind(st)        { return dialOf(st).kind || 'none'; }
+function dialKindKnown(st)   { return !!dialOf(st).kind_known; }
+function dialApn(st)         { return dialOf(st).apn || ''; }
+function dialAddress(st)     { return dialOf(st).address || ''; }
+function dialCid(st)         { return dialOf(st).cid; }
+function dialPdp(st)         { return dialOf(st).pdp || 'IP'; }
+function dialPdpInUse(st)    { return dialOf(st).pdp_in_use || ''; }
+function dialAttempt(st)     { return dialOf(st).attempt; }
+function dialRunning(st)     { return !!dialOf(st).running; }
+function dialSimReady(st)    { return !!dialOf(st).sim_ready; }
+function dialConfigError(st) { return !!dialOf(st).config_error; }
+function dialStoppedHealing(st) { return !!dialOf(st).healing_stopped; }
+
+/* True while the daemon is actively working on the link.
+ *
+ * `wanted` is the user's intent and `up` the result, so the pair says "a dial
+ * is in progress".  FAILED is excluded because a failed attempt is waiting out
+ * its backoff, not working - the step name and the next-try delay say more
+ * there than a spinner would.  This is what the dial page holds the daemon's
+ * foreground for, and nothing else is: the foreground also switches on the cell
+ * polling tier, which that page has no use for. */
+function dialWorking(st) {
+	var d = dialOf(st);
+
+	return !!d.wanted && !d.up && d.step_raw !== NET_STEP.FAILED;
+}
+
+/* null means "not probed yet", which is a fact about the unit rather than about
+ * either verb: the vendor's AT manual says ECM/RMNET use +GTWWAN and only RNDIS
+ * uses +GTRNDIS, while the same vendor's dial-up document shows AT+GTRNDIS=1,1
+ * in its ECM chapter.  fm160d probes and caches; the page only reports. */
+function dialVerb(st) {
+	var d = dialOf(st);
+
+	return d.verb_known ? (d.verb || '') : null;
+}
+
+function dialResets(st) {
+	var r = dialOf(st).resets || {};
+
+	return {
+		inWindow: reported(r.in_window) ? r.in_window : null,
+		limit:    reported(r.limit)     ? r.limit     : null,
+		windowS:  reported(r.window_s)  ? r.window_s  : null,
+		total:    reported(r.total)     ? r.total     : null
+	};
+}
+
+/* The reset ledger as one sentence: how many of the allowance are used inside
+ * the rolling window, and how many have ever been used.  Both matter - the
+ * first is why the daemon may soon stop healing by itself, the second is what
+ * the module has actually been through. */
+function dialResetText(st) {
+	var r = dialResets(st);
+
+	if (r.limit === null || r.inWindow === null)
+		return '';
+	return r.inWindow + ' / ' + r.limit + ' ' + _('in the last') + ' ' +
+	       Math.round((r.windowS || 0) / 3600) + ' h' +
+	       (r.total ? ', ' + r.total + ' ' + _('total') : '');
+}
+
+/* fm160d's own dialler drives ECM only; QMI and MBIM belong to the kernel. */
+function dialIsDaemons(kind) { return kind === 'ecm'; }
+
+/*
+ * The link, in one line, ordered by what the user can act on.
+ *
+ * A refusal that has not been attempted yet comes first (no APN), then the
+ * routing decision (this profile is not ours to dial), then the failure, then
+ * the progress.  "idle" is not an error and is not dressed as one.
+ *
+ * NOTE ON THE TWO KINDS OF TRANSLATABLE STRING
+ *
+ * This file, like every view, contains strings written here - and it also
+ * RENDERS strings that arrived from the daemon: `d.step` is "waiting for
+ * registration", `verdict_text` is "that profile has no AT interface".  Those
+ * are labels the daemon publishes as part of its state machine, so they are
+ * translated here by being passed through _() at the point of display; the
+ * catalog carries them as hand-written msgids because no extractor can see a
+ * value that only exists at run time.
+ *
+ * The line is drawn at LABELS versus DIAGNOSTICS.  A step name and a refusal
+ * reason are vocabulary and get translated.  `last_error` is free-form
+ * diagnostic text that names the specific command, profile number or AT error
+ * code that failed, and it is shown exactly as the daemon wrote it - a
+ * half-translated error is worse than an English one, and the reader of it is
+ * usually looking it up.
+ */
+function dialStateText(st) {
+	var d = dialOf(st);
+
+	if (d.config_error)
+		return _('refused: no usable APN is configured');
+	if (!d.kind_known)
+		return _('the USB profile has not been read yet');
+	if (!dialIsDaemons(d.kind))
+		return _('this profile is dialled by the kernel, not by fm160d');
+	if (d.step_raw === NET_STEP.FAILED)
+		return _('failed') + (d.last_error ? ': ' + d.last_error : '');
+	if (d.up)
+		return _('connected');
+	return _(d.step);
+}
+
+function dialLevel(st) {
+	var d = dialOf(st);
+
+	if (d.up)
+		return 'ok';
+	if (d.config_error || d.step_raw === NET_STEP.FAILED)
+		return 'bad';
+	if (!dialIsDaemons(d.kind) || d.step_raw === NET_STEP.IDLE ||
+	    d.step_raw === NET_STEP.DOWN)
+		return 'off';
+	return 'warn';
+}
+
+/* --- the USB profile switch ------------------------------------------- */
+
+function modeswStateRaw(st) { return modeswOf(st).state_raw; }
+function modeswPending(st)  { return !!modeswOf(st).pending; }
+function modeswBusy(st)     { return !!modeswOf(st).busy; }
+
+/* null until AT+GTUSBMODE? has answered.  It really can be unknown: 17 and 32
+ * share a PID and so do 18 and 33, so the number cannot be inferred from
+ * VID:PID and has to be read back. */
+function modeswCurrent(st) {
+	var m = modeswOf(st);
+
+	return m.current_known ? m.current : null;
+}
+
+function modeswRollback(st) {
+	var m = modeswOf(st);
+
+	return reported(m.rollback_mode) && m.rollback_mode >= 0 ? m.rollback_mode : null;
+}
+
+function modeswTarget(st) {
+	var m = modeswOf(st);
+
+	return reported(m.target) && m.target >= 0 ? m.target : null;
+}
+
+/* The state machine is blocked on a module that never came back.  This is the
+ * one state a page must shout about: switching again is refused, and the way
+ * out is a hand on the hardware. */
+function modeswStuck(st) { return modeswStateRaw(st) === MODESW.STUCK; }
+
+function modeswStateText(st) {
+	var m = modeswOf(st);
+
+	if (m.state_raw === MODESW.STUCK)
+		return _('the module has not answered since the switch');
+	if (m.pending)
+		return _('the module is restarting in profile') + ' ' + modeswTarget(st);
+	if (m.rolled_back)
+		return _('the switch was rolled back');
+	if (modeswCurrent(st) === null)
+		return _('profile not read yet');
+	return _('in profile') + ' ' + modeswCurrent(st);
+}
+
+/* The category a verdict falls into, for grouping and colour.  Derived here
+ * because the page needs three buckets, NOT because the decision is ours. */
+function usbVerdictCategory(v) {
+	switch (v) {
+	case USB_VERDICT.OK:               return 'ok';
+	case USB_VERDICT.OK_SAME:          return 'same';
+	case USB_VERDICT.DENY_NO_AT:       return 'no-at';
+	case USB_VERDICT.DENY_NO_DRIVER:   return 'no-driver';
+	case USB_VERDICT.DENY_UNDOCUMENTED:return 'undocumented';
+	case USB_VERDICT.DENY_NOT_SUPPORTED: return 'unsupported';
+	case USB_VERDICT.DENY_LIST_UNKNOWN: return 'list-unknown';
+	}
+	return 'unknown';
+}
+
+/* One row of the fm160.profiles answer, shaped for a table.  `layout` comes
+ * from the daemon rather than from USB_MODES above, so the text a user reads is
+ * the text the daemon's own decision was made about.
+ *
+ * `selectable` and `selectableAdvanced` are the daemon's two answers to "may
+ * this be switched to": the first without an opt-in, the second with one.
+ * `needsOptin` is the difference, and it is the ONLY reason the page ever asks
+ * the daemon for an advanced switch. */
+function profileRows(res) {
+	return ((res && res.profiles) || []).map(function(p) {
+		return {
+			mode: p.mode,
+			pid: p.pid || '',
+			kind: p.kind || 'none',
+			layout: p.layout || '',
+			hasAt: !!p.has_at,
+			documented: !!p.documented,
+			kernelEntry: !!p.kernel_entry,
+			blacklisted: !!p.blacklisted,
+			current: !!p.current,
+			verdict: p.verdict,
+			verdictText: p.verdict_text || '',
+			verdictKind: usbVerdictCategory(p.verdict),
+			selectable: !!p.selectable,
+			selectableAdvanced: !!p.selectable_advanced,
+			needsOptin: !p.selectable && !!p.selectable_advanced
+		};
+	});
+}
+
+/* Rows that may be offered as a target right now.  The current profile is not a
+ * choice, so it is separated out rather than greyed in place; `advanced` admits
+ * the device-dependent profiles, which is what the page's opt-in checkbox sets. */
+function profileChoices(rows, advanced) {
+	return (rows || []).filter(function(p) {
+		return !p.current && (p.selectable ||
+		       (advanced && p.selectableAdvanced));
+	});
+}
+
+/* Rows that cannot be chosen, with the reason the daemon gave.  Shown rather
+ * than hidden: "the modem offers 24, and we refuse it, because it has no AT
+ * interface" is a more useful thing to read than a profile that is simply
+ * missing from the list. */
+function profileRefused(rows, advanced) {
+	return (rows || []).filter(function(p) {
+		return !p.current && p.verdictKind !== 'same' &&
+		       !(p.selectable || (advanced && p.selectableAdvanced));
+	});
+}
+
 return baseclass.extend({
 	USB_MODES: USB_MODES,
 	USB_PLATFORM: USB_PLATFORM,
@@ -1054,6 +1390,9 @@ return baseclass.extend({
 	smsDelete: callSmsDelete,
 	smsMarkRead: callSmsRead,
 	smsSync: callSmsSync,
+
+	/* M6 */
+	diagnostics: callDiagnostics,
 
 	ratName: ratName,
 	regName: regName,
@@ -1163,6 +1502,53 @@ return baseclass.extend({
 	smsEncodingName: smsEncodingName,
 	smsPartsText: smsPartsText,
 	smsEstimate: smsEstimate,
+
+	/* --- M2 -------------------------------------------------------- */
+	NET_STEP: NET_STEP,
+	MODESW: MODESW,
+	USB_VERDICT: USB_VERDICT,
+	dialStart: callDialStart,
+	dialStop: callDialStop,
+	dialConfig: callDialConfig,
+	profiles: callProfiles,
+	setUsbMode: callSetUsbMode,
+	dialOf: dialOf,
+	dialUp: dialUp,
+	dialStep: dialStep,
+	dialStepRaw: dialStepRaw,
+	dialUsable: dialUsable,
+	dialKind: dialKind,
+	dialKindKnown: dialKindKnown,
+	dialApn: dialApn,
+	dialAddress: dialAddress,
+	dialCid: dialCid,
+	dialPdp: dialPdp,
+	dialPdpInUse: dialPdpInUse,
+	dialAttempt: dialAttempt,
+	dialRunning: dialRunning,
+	dialSimReady: dialSimReady,
+	dialConfigError: dialConfigError,
+	dialStoppedHealing: dialStoppedHealing,
+	dialWorking: dialWorking,
+	dialVerb: dialVerb,
+	dialResets: dialResets,
+	dialResetText: dialResetText,
+	dialIsDaemons: dialIsDaemons,
+	dialStateText: dialStateText,
+	dialLevel: dialLevel,
+	modeswOf: modeswOf,
+	modeswStateRaw: modeswStateRaw,
+	modeswStateText: modeswStateText,
+	modeswPending: modeswPending,
+	modeswBusy: modeswBusy,
+	modeswCurrent: modeswCurrent,
+	modeswTarget: modeswTarget,
+	modeswRollback: modeswRollback,
+	modeswStuck: modeswStuck,
+	usbVerdictCategory: usbVerdictCategory,
+	profileRows: profileRows,
+	profileChoices: profileChoices,
+	profileRefused: profileRefused,
 
 	/*
 	 * Modes that may be offered for a given dial kind.

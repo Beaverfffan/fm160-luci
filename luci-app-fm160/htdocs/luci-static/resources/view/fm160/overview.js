@@ -134,7 +134,7 @@ return view.extend({
 				_('Management is paused. No polling is running.')));
 
 		var identity = [
-			[ _('Manufacturer'),   state.manufacturer || '-' ],
+			[ _('Manufacturer', 'fm160 identity field'),   state.manufacturer || '-' ],
 			[ _('Model'),          state.model || '-' ],
 			[ _('Firmware'),       state.revision || '-' ],
 			[ _('IMEI'),           state.imei || '-' ],
@@ -158,7 +158,7 @@ return view.extend({
 			[ _('LTE registration'),    api.regName(state.cereg) ],
 			[ _('NR registration'),     api.regName(state.c5greg) ],
 			[ _('Serving RAT'),         state.cell_valid ? api.ratName(state.serving.rat) : '-' ],
-			[ _('Band'),                state.cell_valid && api.cellBand(state.serving) ?
+			[ _('Band', 'fm160 band column'),                state.cell_valid && api.cellBand(state.serving) ?
 						    api.fmtBand(api.cellBand(state.serving)) : '-' ],
 			/* 99 is AT+CSQ's "not measurable"; on the 5G path the same field
 			 * carries SS-RSRP, so label it as what it actually is. */
@@ -175,8 +175,8 @@ return view.extend({
 			[ _('Interface'), api.trafficOf(state).netdev || _('not detected') ],
 			[ _('Received'),  api.fmtBytes(api.trafficOf(state).rx_bytes) ],
 			[ _('Sent'),      api.fmtBytes(api.trafficOf(state).tx_bytes) ],
-			[ _('Down'),      api.fmtRate(api.trafficOf(state).rx_bps) ],
-			[ _('Up'),        api.fmtRate(api.trafficOf(state).tx_bps) ]
+			[ _('Down', 'fm160 traffic direction'),      api.fmtRate(api.trafficOf(state).rx_bps) ],
+			[ _('Up', 'fm160 traffic direction'),        api.fmtRate(api.trafficOf(state).tx_bps) ]
 		];
 
 		this.body.innerHTML = '';
@@ -189,7 +189,7 @@ return view.extend({
 			this.body.appendChild(section(_('Serving cell'), kv([
 				[ _('PLMN'),     api.cellPlmn(c) || '-' ],
 				[ _('TAC'),      api.fmtNum(api.cellTac(c)) ],
-				[ _('Cell ID'),  api.fmtNum(api.cellCellId(c)) ],
+				[ _('Cell ID', 'fm160 cell field'),  api.fmtNum(api.cellCellId(c)) ],
 				[ _('EARFCN'),   api.fmtNum(api.cellEarfcn(c)) ],
 				[ _('PCI'),      api.cellPci(c) === null ? '-' : String(api.cellPci(c)) ],
 				/* fm160d decodes the bandwidth field to MHz; the raw value is

@@ -874,6 +874,425 @@ static int handle_sms_sync(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+/* --- M2 ------------------------------------------------------------- */
+
+enum {
+	ATTR_DIAL_APN,
+	ATTR_DIAL_PDP,
+	ATTR_DIAL_CID,
+	ATTR_DIAL_ALLOW_RESET,
+	ATTR_DIAL_AUTOSTART,
+	__ATTR_DIAL_MAX
+};
+
+static const struct blobmsg_policy dial_policy[] = {
+	[ATTR_DIAL_APN]         = { .name = "apn",         .type = BLOBMSG_TYPE_STRING },
+	[ATTR_DIAL_PDP]         = { .name = "pdp",         .type = BLOBMSG_TYPE_STRING },
+	[ATTR_DIAL_CID]         = { .name = "cid",         .type = BLOBMSG_TYPE_INT32  },
+	[ATTR_DIAL_ALLOW_RESET] = { .name = "allow_reset", .type = BLOBMSG_TYPE_BOOL   },
+	[ATTR_DIAL_AUTOSTART]   = { .name = "autostart",   .type = BLOBMSG_TYPE_BOOL   },
+};
+
+enum {
+	ATTR_USBMODE,
+	ATTR_USBMODE_ADVANCED,
+	__ATTR_USBMODE_MAX
+};
+
+static const struct blobmsg_policy usbmode_policy[] = {
+	[ATTR_USBMODE]          = { .name = "mode",     .type = BLOBMSG_TYPE_INT32 },
+	[ATTR_USBMODE_ADVANCED] = { .name = "advanced", .type = BLOBMSG_TYPE_BOOL  },
+};
+
+/*
+ * Start and stop the link.
+ *
+ * The answer is immediate and carries the daemon's own verdict; the link
+ * itself comes up over the next seconds to minutes, which is why `step` in the
+ * snapshot - not this reply - is what a page watches.  A dial is refused for
+ * reasons that are all worth naming: no APN, an APN that cannot be spelled
+ * into an AT argument, no AT port yet, or a USB profile this daemon does not
+ * dial.
+ */
+static int dial_reply(struct ubus_context *ctx, struct ubus_request_data *req,
+		      int rc)
+{
+	struct blob_buf b = {};
+	const struct fm160_dial_state *d = &g_state.dial;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "result",
+			   rc == 0 ? "started" :
+			   rc == -EINVAL ? "bad-config" :
+			   rc == -ENOTSUP ? "wrong-profile" :
+			   rc == -EAGAIN ? "not-ready" : "error");
+	blobmsg_add_string(&b, "step", fm160_net_step_name(d->step));
+	blobmsg_add_u8(&b, "up", d->up);
+	blobmsg_add_string(&b, "address", d->addr);
+	blobmsg_add_string(&b, "kind", fm160_dial_kind_name(d->kind));
+	blobmsg_add_u8(&b, "usable", fm160_dial_usable());
+	blobmsg_add_string(&b, "detail", d->last_error);
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return UBUS_STATUS_OK;
+}
+
+static int handle_dial_start(struct ubus_context *ctx, struct ubus_object *obj,
+			     struct ubus_request_data *req, const char *method,
+			     struct blob_attr *msg)
+{
+	(void)obj;
+	(void)method;
+	(void)msg;
+
+	return dial_reply(ctx, req, fm160_dial_start());
+}
+
+static int handle_dial_stop(struct ubus_context *ctx, struct ubus_object *obj,
+			    struct ubus_request_data *req, const char *method,
+			    struct blob_attr *msg)
+{
+	(void)obj;
+	(void)method;
+	(void)msg;
+
+	return dial_reply(ctx, req, fm160_dial_stop());
+}
+
+/*
+ * The dial settings.
+ *
+ * This is the one place in fm160d that writes to uci from a ubus call, and it
+ * does so for a specific reason: the alternative is the page writing uci and
+ * then asking the daemon to reload, which means the setting has two writers
+ * and the window between them is a state where the page and the daemon
+ * disagree.  The values are validated BEFORE anything is persisted, so a bad
+ * APN cannot be stored and then discovered at the next dial.
+ */
+static int handle_dial_config(struct ubus_context *ctx, struct ubus_object *obj,
+			      struct ubus_request_data *req, const char *method,
+			      struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_DIAL_MAX];
+	struct blob_buf b = {};
+
+	(void)obj;
+	(void)method;
+
+	blobmsg_parse(dial_policy, __ATTR_DIAL_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+
+	if (tb[ATTR_DIAL_APN]) {
+		const char *apn = blobmsg_get_string(tb[ATTR_DIAL_APN]);
+
+		/* An empty value is how the page clears it; anything else has
+		 * to pass the same grammar the command builder enforces. */
+		if (apn[0] && !fm160_net_apn_ok(apn))
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		fm160_uci_set("main", "dial_apn", apn);
+	}
+	if (tb[ATTR_DIAL_PDP]) {
+		enum fm160_net_pdp p;
+
+		if (!fm160_net_pdp_parse(blobmsg_get_string(tb[ATTR_DIAL_PDP]), &p))
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		fm160_uci_set("main", "dial_pdp", fm160_net_pdp_name(p));
+	}
+	if (tb[ATTR_DIAL_CID]) {
+		int cid = (int)blobmsg_get_u32(tb[ATTR_DIAL_CID]);
+
+		if (!fm160_net_cid_ok(cid))
+			return UBUS_STATUS_INVALID_ARGUMENT;
+		fm160_uci_set_int("main", "dial_cid", cid);
+	}
+	if (tb[ATTR_DIAL_ALLOW_RESET])
+		fm160_uci_set("main", "dial_allow_reset",
+			      blobmsg_get_bool(tb[ATTR_DIAL_ALLOW_RESET]) ? "1" : "0");
+	if (tb[ATTR_DIAL_AUTOSTART])
+		fm160_uci_set("main", "dial_autostart",
+			      blobmsg_get_bool(tb[ATTR_DIAL_AUTOSTART]) ? "1" : "0");
+
+	/* Re-read what was just written, so the running daemon and the file
+	 * are the same thing - there is no second code path that could drift. */
+	fm160_config_load();
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "apn", g_state.dial.apn);
+	blobmsg_add_string(&b, "pdp", fm160_net_pdp_name(g_state.dial.pdp));
+	blobmsg_add_u32(&b, "cid", (uint32_t)g_state.dial.cid);
+	blobmsg_add_u8(&b, "allow_reset", g_state.dial.allow_reset);
+	blobmsg_add_u8(&b, "autostart", g_state.dial.autostart);
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return UBUS_STATUS_OK;
+}
+
+/*
+ * What the modem offers, and what may be done about each of them.
+ *
+ * Built on demand rather than published in the snapshot: it is fourteen static
+ * rows plus two arrays, and the snapshot is rebuilt about twice a second
+ * because a sysfs counter moved.
+ *
+ * The `verdict` / `selectable` pair is computed by fm160_usbmode_decide() -
+ * the same function that guards the write - so the page's greyed-out rows and
+ * the daemon's refusal cannot disagree.  `selectable_advanced` is the same
+ * question with the opt-in granted, which is what the page labels "advanced".
+ */
+static int handle_profiles(struct ubus_context *ctx, struct ubus_object *obj,
+			   struct ubus_request_data *req, const char *method,
+			   struct blob_attr *msg)
+{
+	const struct fm160_modesw *m = &g_state.modesw;
+	struct blob_buf b = {};
+	void *arr, *t;
+	int i;
+
+	(void)obj;
+	(void)method;
+	(void)msg;
+
+	blob_buf_init(&b, 0);
+
+	blobmsg_add_u32(&b, "current", (uint32_t)m->current);
+	blobmsg_add_u8(&b, "current_known", m->current >= 0);
+	blobmsg_add_u8(&b, "caps_valid", m->caps_valid);
+
+	arr = blobmsg_open_array(&b, "supported");
+	for (i = 0; i < m->supported_n; i++)
+		blobmsg_add_u32(&b, NULL, (uint32_t)m->supported[i]);
+	blobmsg_close_array(&b, arr);
+
+	/* The modem's answer, and our hard blacklist, are separate gates: the
+	 * page shows both so that "the modem offers it but we refuse" reads as
+	 * what it is rather than as a bug. */
+	arr = blobmsg_open_array(&b, "blacklisted");
+	for (i = 0; i < fm160_usbmode_table_size(); i++) {
+		const struct fm160_usbmode_info *mi = fm160_usbmode_at(i);
+
+		if (mi && fm160_usbmode_blacklisted(mi->mode))
+			blobmsg_add_u32(&b, NULL, (uint32_t)mi->mode);
+	}
+	blobmsg_close_array(&b, arr);
+
+	/* Preferred targets per dial kind, best first.  Taken from usbmode.c
+	 * rather than sorted here, so the "33 before 18" reasoning stays in
+	 * one place. */
+	arr = blobmsg_open_array(&b, "preferred");
+	for (i = DIAL_KIND_QMI; i <= DIAL_KIND_ECM; i++) {
+		int list[FM160_DIAL_KIND_MAX];
+		int n = fm160_usbmode_preferred((enum fm160_dial_kind)i, list,
+						FM160_DIAL_KIND_MAX);
+		void *k = blobmsg_open_table(&b, NULL);
+		int j;
+
+		blobmsg_add_string(&b, "kind",
+				   fm160_dial_kind_name((enum fm160_dial_kind)i));
+		t = blobmsg_open_array(&b, "modes");
+		for (j = 0; j < n; j++)
+			blobmsg_add_u32(&b, NULL, (uint32_t)list[j]);
+		blobmsg_close_array(&b, t);
+		blobmsg_close_table(&b, k);
+	}
+	blobmsg_close_array(&b, arr);
+
+	arr = blobmsg_open_array(&b, "profiles");
+	for (i = 0; i < fm160_usbmode_table_size(); i++) {
+		const struct fm160_usbmode_info *mi = fm160_usbmode_at(i);
+		enum fm160_usbmode_verdict v, va;
+
+		if (!mi)
+			continue;
+		v = fm160_usbmode_decide(m->current, mi->mode, m->supported,
+					 m->supported_n, m->caps_valid, false);
+		va = fm160_usbmode_decide(m->current, mi->mode, m->supported,
+					  m->supported_n, m->caps_valid, true);
+
+		t = blobmsg_open_table(&b, NULL);
+		blobmsg_add_u32(&b, "mode", (uint32_t)mi->mode);
+		blobmsg_add_string(&b, "pid", mi->pid);
+		blobmsg_add_string(&b, "kind", fm160_dial_kind_name(mi->kind));
+		blobmsg_add_u8(&b, "has_at", mi->has_at);
+		blobmsg_add_u8(&b, "documented", mi->documented);
+		blobmsg_add_u8(&b, "kernel_entry", mi->kernel_entry);
+		blobmsg_add_u8(&b, "blacklisted",
+			       fm160_usbmode_blacklisted(mi->mode));
+		blobmsg_add_u8(&b, "current", mi->mode == m->current);
+		blobmsg_add_u32(&b, "verdict", (uint32_t)v);
+		blobmsg_add_string(&b, "verdict_text",
+				   fm160_usbmode_verdict_text(v));
+		blobmsg_add_u8(&b, "selectable", fm160_usbmode_verdict_is_ok(v));
+		blobmsg_add_u8(&b, "selectable_advanced",
+			       fm160_usbmode_verdict_is_ok(va));
+		blobmsg_add_string(&b, "layout", mi->layout);
+		blobmsg_close_table(&b, t);
+	}
+	blobmsg_close_array(&b, arr);
+
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return UBUS_STATUS_OK;
+}
+
+/*
+ * Ask for a profile change.
+ *
+ * Answered as soon as the WRITE has been accepted, not when the switch has
+ * finished: the module re-enumerates, which takes 30-90 s, and holding a ubus
+ * request open for that long would time out at every caller including our own
+ * page.  What the caller watches instead is modesw.state in the snapshot,
+ * which goes applying -> verifying -> idle (or stuck).
+ *
+ * The refusal is the interesting part and it is always specific: which gate
+ * failed, and why.  It comes from fm160_modesw_apply(), which is the same code
+ * path a second caller would go through - the page's own filtering is a
+ * convenience, never the guard.
+ */
+static int handle_setusbmode(struct ubus_context *ctx, struct ubus_object *obj,
+			     struct ubus_request_data *req, const char *method,
+			     struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_USBMODE_MAX];
+	const struct fm160_modesw *m = &g_state.modesw;
+	struct blob_buf b = {};
+	int mode, rc;
+	bool advanced;
+
+	(void)obj;
+	(void)method;
+
+	blobmsg_parse(usbmode_policy, __ATTR_USBMODE_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_USBMODE])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	mode = (int)blobmsg_get_u32(tb[ATTR_USBMODE]);
+	advanced = tb[ATTR_USBMODE_ADVANCED] &&
+		   blobmsg_get_bool(tb[ATTR_USBMODE_ADVANCED]);
+
+	rc = fm160_modesw_apply(mode, advanced);
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "result",
+			   rc == 0 && m->pending ? "applying" :
+			   rc == 0 ? "already" :
+			   rc == -EPERM ? "refused" :
+			   rc == -EBUSY ? "busy" :
+			   rc == -EAGAIN ? "not-ready" : "error");
+	blobmsg_add_u32(&b, "mode", (uint32_t)mode);
+	blobmsg_add_u32(&b, "current", (uint32_t)m->current);
+	blobmsg_add_u32(&b, "rollback_mode", (uint32_t)m->rollback_mode);
+	blobmsg_add_u8(&b, "advanced", advanced);
+	blobmsg_add_string(&b, "detail", m->last_error);
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return UBUS_STATUS_OK;
+}
+
+/*
+ * --- M6: the support bundle -----------------------------------------
+ *
+ * The one read that is not the snapshot.
+ *
+ * Everything else in this object answers a question the LuCI page asked, and
+ * answers it in the shape that page wants.  This answers the question a person
+ * asks when something has gone wrong and the page is no longer enough: "what
+ * does the daemon actually think is going on".  The answer is prose, because
+ * its consumer is a human writing a bug report, and it is produced entirely
+ * from the cached state and the log ring - it touches the modem not at all, so
+ * asking for it cannot disturb the thing being diagnosed.
+ *
+ * That last point is the design constraint rather than a nicety.  The obvious
+ * way to build a diagnostic is to re-read the modem, and on this hardware a
+ * re-read is exactly what makes the fault disappear: it opens a quiet window,
+ * resets the poll ladder and changes the timing that the bug depends on.  A
+ * diagnostic that alters the machine is not a diagnostic.
+ *
+ * The reply carries the text under "text" and the few numbers a page wants to
+ * show without parsing it.  There is no partial success: if the buffer cannot
+ * hold the bundle, that is the answer, because a truncated support bundle is
+ * worse than a refusal - the reader has no way to tell what is missing.
+ */
+static const struct fm160_log_rec *diag_log[FM160_LOG_RING_LINES];
+static char diag_buf[FM160_DIAG_BUF_MAX];
+
+static int handle_diagnostics(struct ubus_context *ctx, struct ubus_object *obj,
+			      struct ubus_request_data *req, const char *method,
+			      struct blob_attr *msg)
+{
+	struct fm160_diag_in in = { 0 };
+	struct blob_buf b = {};
+	char wall[48];
+	struct tm tm;
+	time_t now;
+	size_t i, n;
+	long len;
+	int rc = UBUS_STATUS_OK;
+
+	/*
+	 * Borrow the ring.  fm160_diag_format() must not log while it walks
+	 * these, and does not - see the contract in diag.h.
+	 */
+	n = fm160_log_ring_count();
+	if (n > FM160_LOG_RING_LINES)
+		n = FM160_LOG_RING_LINES;
+	for (i = 0; i < n; i++) {
+		if (!(diag_log[i] = fm160_log_ring_at(i))) {
+			n = i;
+			break;
+		}
+	}
+
+	/*
+	 * The wall clock, if there is one.  A router that has never reached NTP
+	 * reports 1970, and printing that as the time the bundle was generated
+	 * would be actively misleading in a report whose whole purpose is to
+	 * establish a sequence of events - so an unset clock is printed as
+	 * unset and the uptime carries the ordering instead.
+	 */
+	wall[0] = '\0';
+	now = time(NULL);
+	if (now > 0 && localtime_r(&now, &tm))
+		strftime(wall, sizeof(wall), "%Y-%m-%d %H:%M:%S %z", &tm);
+
+	in.st = &g_state;
+	in.log = diag_log;
+	in.log_n = n;
+	in.log_total = fm160_log_ring_total();
+	in.atq_depth = atq_depth();
+	in.now_ms = fm160_now_ms();
+	in.uptime_ms = fm160_uptime_ms();
+	in.wall = wall;
+	in.log_level = fm160_log_level();
+	in.version = FM160_VERSION;
+
+	len = fm160_diag_format(&in, diag_buf, sizeof(diag_buf));
+
+	blob_buf_init(&b, 0);
+	if (len < 0) {
+		/* Not a crash and not an empty answer: the bundle was too big for
+		 * its own worst-case buffer, which is a bug in the sizing rather
+		 * than a condition the caller can retry around.  Saying so beats
+		 * returning a report that stops in the middle of the log. */
+		fm160_log(LOG_ERR, "diagnostics bundle exceeds %zu bytes",
+			  sizeof(diag_buf));
+		blobmsg_add_string(&b, "error", "bundle too large");
+		rc = UBUS_STATUS_UNKNOWN_ERROR;
+	} else {
+		blobmsg_add_string(&b, "text", diag_buf);
+		blobmsg_add_string(&b, "version", FM160_VERSION);
+		blobmsg_add_u64(&b, "uptime_ms", in.uptime_ms);
+		blobmsg_add_u32(&b, "log_lines", (uint32_t)n);
+		blobmsg_add_u32(&b, "log_total", (uint32_t)in.log_total);
+		blobmsg_add_u32(&b, "log_level", (uint32_t)in.log_level);
+		blobmsg_add_u32(&b, "bytes", (uint32_t)len);
+	}
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+
+	return rc;
+}
+
 static const struct ubus_method fm160_methods[] = {
 	UBUS_METHOD_NOARG("status",   handle_status),
 	UBUS_METHOD("profile",   handle_profile,   profile_policy),
@@ -897,6 +1316,19 @@ static const struct ubus_method fm160_methods[] = {
 	UBUS_METHOD("sms_delete",   handle_sms_delete,   sms_id_policy),
 	UBUS_METHOD("sms_markread", handle_sms_markread, sms_id_policy),
 	UBUS_METHOD_NOARG("sms_sync",   handle_sms_sync),
+	/* M2.  Nothing here defers: a dial's answer is the daemon's verdict and
+	 * the link comes up afterwards, and a profile change ends with the
+	 * module re-enumerating, which no ubus reply should wait for.  The
+	 * state to watch is in the snapshot ("dial" and "modesw"). */
+	UBUS_METHOD_NOARG("dial_start",  handle_dial_start),
+	UBUS_METHOD_NOARG("dial_stop",   handle_dial_stop),
+	UBUS_METHOD("dial_config",  handle_dial_config,  dial_policy),
+	UBUS_METHOD_NOARG("profiles",    handle_profiles),
+	UBUS_METHOD("setusbmode",   handle_setusbmode,   usbmode_policy),
+	/* M6.  Reads the cached state and the log ring; touches no hardware, so
+	 * unlike every other method here it is safe to call while something is
+	 * already wrong - which is the only time it is called. */
+	UBUS_METHOD_NOARG("diagnostics", handle_diagnostics),
 };
 
 static struct ubus_object_type fm160_obj_type =

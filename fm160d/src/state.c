@@ -823,6 +823,121 @@ struct blob_buf *fm160_state_blob(void)
 		blobmsg_close_table(&b, t);
 	}
 
+	/* --- M2: the data plane and the USB profile switch -------------- */
+	/*
+	 * Two tables, and they are kept apart for the same reason the structs
+	 * are: "how the link is dialled" and "which physical profile the modem
+	 * is in" fail differently, and only the second can take the management
+	 * channel away.
+	 *
+	 * What is NOT here: the list of profiles the modem offers.  That is
+	 * static data (fourteen rows) and this snapshot is rebuilt whenever a
+	 * sysfs counter moves - about twice a second.  The page asks for it
+	 * once, through fm160.profiles, exactly as it does for the SMS list.
+	 */
+	{
+		const struct fm160_dial_state *d = &g_state.dial;
+		void *t = blobmsg_open_table(&b, "dial");
+
+		blobmsg_add_u8(&b, "wanted", d->wanted);
+		blobmsg_add_string(&b, "step", fm160_net_step_name(d->step));
+		blobmsg_add_u32(&b, "step_raw", (uint32_t)d->step);
+		blobmsg_add_string(&b, "kind", fm160_dial_kind_name(d->kind));
+		blobmsg_add_u8(&b, "kind_known", d->kind_known);
+		blobmsg_add_u8(&b, "usable", fm160_dial_usable());
+		blobmsg_add_u32(&b, "cid", (uint32_t)d->cid);
+		blobmsg_add_string(&b, "pdp", fm160_net_pdp_name(d->pdp));
+		blobmsg_add_string(&b, "apn", d->apn);
+		blobmsg_add_u8(&b, "up", d->up);
+		blobmsg_add_string(&b, "address", d->addr);
+		blobmsg_add_string(&b, "dns1", d->dns1);
+		blobmsg_add_string(&b, "dns2", d->dns2);
+		blobmsg_add_string(&b, "pdp_in_use", d->pdp_in_use);
+		/* -1 means "not probed yet", which is a different statement from
+		 * either verb being wrong - the vendor's two documents disagree
+		 * (net.h), so this is a fact about the unit. */
+		blobmsg_add_u8(&b, "verb_known", d->verb >= 0);
+		blobmsg_add_string(&b, "verb", d->verb >= 0 ?
+				   fm160_net_verb_name((enum fm160_net_verb)d->verb) : "");
+		blobmsg_add_u32(&b, "attempt", (uint32_t)d->attempt);
+		blobmsg_add_u32(&b, "ladder_len",
+				(uint32_t)fm160_net_ladder_len());
+		blobmsg_add_u32(&b, "ip_polls", (uint32_t)d->ip_polls);
+		blobmsg_add_u8(&b, "running", d->running);
+		blobmsg_add_u8(&b, "sim_ready", d->sim_ready);
+		blobmsg_add_u8(&b, "was_up", d->was_up);
+		blobmsg_add_u8(&b, "allow_reset", d->allow_reset);
+		blobmsg_add_u8(&b, "autostart", d->autostart);
+		blobmsg_add_u8(&b, "config_error", d->config_error);
+		blobmsg_add_u8(&b, "healing_stopped", d->healing_stopped);
+		if (d->next_try_ms != UINT64_MAX && d->next_try_ms > fm160_now_ms())
+			blobmsg_add_u64(&b, "next_try_in_ms",
+					d->next_try_ms - fm160_now_ms());
+		blobmsg_add_u32(&b, "starts", (uint32_t)d->starts);
+		blobmsg_add_u32(&b, "failures", (uint32_t)d->failures);
+		blobmsg_add_string(&b, "last_error", d->last_error);
+		if (d->last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - d->last_ok_ms);
+
+		/* DESIGN 4.3's evidence, exported because the number is the
+		 * difference between "we keep trying" and "we stopped on
+		 * purpose" - and because a reset ledger the page cannot show
+		 * is a reset ledger nobody can audit. */
+		{
+			void *r = blobmsg_open_table(&b, "resets");
+
+			blobmsg_add_u32(&b, "in_window",
+					(uint32_t)d->resets_in_window);
+			blobmsg_add_u32(&b, "limit",
+					(uint32_t)FM160_NET_RESET_LIMIT);
+			blobmsg_add_u32(&b, "window_s",
+					(uint32_t)FM160_NET_RESET_WINDOW_S);
+			blobmsg_add_u32(&b, "total", (uint32_t)d->resets_total);
+			blobmsg_close_table(&b, r);
+		}
+		blobmsg_close_table(&b, t);
+	}
+
+	{
+		const struct fm160_modesw *m = &g_state.modesw;
+		static const char *st_names[] = {
+			"idle", "reading the profile list", "applying",
+			"verifying", "stuck",
+		};
+		void *t = blobmsg_open_table(&b, "modesw");
+		int i;
+
+		blobmsg_add_string(&b, "state",
+				   (m->st >= 0 && (size_t)m->st <
+				    ARRAY_SIZE(st_names)) ? st_names[m->st] : "?");
+		blobmsg_add_u32(&b, "state_raw", (uint32_t)m->st);
+		blobmsg_add_u8(&b, "current_known", m->current >= 0);
+		blobmsg_add_u32(&b, "current", (uint32_t)m->current);
+		blobmsg_add_u32(&b, "target", (uint32_t)m->target);
+		blobmsg_add_u32(&b, "rollback_mode", (uint32_t)m->rollback_mode);
+		blobmsg_add_u8(&b, "caps_valid", m->caps_valid);
+		{
+			void *s = blobmsg_open_array(&b, "supported");
+
+			for (i = 0; i < m->supported_n; i++)
+				blobmsg_add_u32(&b, NULL, (uint32_t)m->supported[i]);
+			blobmsg_close_array(&b, s);
+		}
+		blobmsg_add_u8(&b, "pending", m->pending);
+		if (m->pending)
+			blobmsg_add_u64(&b, "pending_for_ms",
+					fm160_now_ms() - m->pending_since_ms);
+		blobmsg_add_u32(&b, "verify_result", (uint32_t)m->verify_result);
+		blobmsg_add_u8(&b, "rolled_back", m->rolled_back);
+		blobmsg_add_u8(&b, "busy", m->busy);
+		blobmsg_add_string(&b, "last_error", m->last_error);
+		if (m->last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - m->last_ok_ms);
+		blobmsg_close_table(&b, t);
+	}
+
 	/* --- traffic -------------------------------------------------- */
 	{
 		void *t = blobmsg_open_table(&b, "traffic");

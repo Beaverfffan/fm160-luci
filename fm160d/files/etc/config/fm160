@@ -25,3 +25,56 @@ config fm160 'main'
 	# cycle.  This option is what makes it stick; leaving it at 0 does NOT
 	# mean "off", it means "whatever the module happens to be doing".
 	option gnss_autostart '0'
+
+	# ----------------------------------------------------------------
+	# M2: the data plane
+	# ----------------------------------------------------------------
+
+	# The APN of the PDP context fm160d dials.  Empty by default, and the
+	# daemon REFUSES to dial rather than guessing one: an invented APN is a
+	# context that activates, gets an address and routes nowhere, which
+	# looks like a broken modem instead of a missing setting.
+	#
+	# Only letters, digits, '.', '-' and '_' are accepted.  A quote, comma
+	# or semicolon in an APN would end the quoted argument of
+	# AT+CGDCONT= and turn the rest of the string into further AT fields,
+	# so anything else is refused rather than escaped.
+	# option dial_apn 'cmnet'
+
+	# One of IP, IPV6, IPV4V6.
+	option dial_pdp 'IP'
+
+	# The PDP context id to use, 1..15.
+	option dial_cid '1'
+
+	# Dial as soon as the modem is reachable.  Off by default: a link that
+	# comes up before anyone asked for it is a surprise on a metered SIM,
+	# and on a modem with no SIM it is a ladder that climbs forever.
+	option dial_autostart '0'
+
+	# Let the reconnect ladder end in AT+CFUN=1,1 (a module reset).  Off by
+	# default, and the default is the safety property: with it off the
+	# ladder stops and reports instead of rebooting the module on a timer.
+	# Even when on, at most 3 resets are performed per 24 h (see the audit
+	# in the dial "resets" table) and then fm160d stops healing itself.
+	option dial_allow_reset '0'
+
+# The module-reset audit trail (DESIGN 4.3).  Written by fm160d, not by hand;
+# it lives in its own section because it has to survive a restart: without the
+# count, "three resets in 24 h and then stop" would reset its own limit every
+# time procd respawned the daemon.
+config dial 'dial'
+	option reset_total '0'
+	# Epoch seconds of the recent resets, newest first.
+	option reset_stamps ''
+
+# The USB profile switch (DESIGN 5.2).  `pending` is 1 only between the write
+# and the read-back that confirms it, and it is written BEFORE AT+GTUSBMODE:
+# after that command the module may re-enumerate, so this is the only record of
+# where it came from.  A switch applied just before the daemon died is still
+# verified on the next boot because of it.
+config switch 'switch'
+	option pending '0'
+	option pending_since '0'
+	option target '-1'
+	option rollback_mode '-1'

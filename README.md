@@ -14,11 +14,11 @@
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | **M1** | AT 内核：端口发现、单属主队列、URC 事件、分级调度、静默窗、熔断、状态缓存、ubus 接口；身份/注网/信号/小区解析；LuCI 概览·信号·AT 调试三页 | ✅ **已完成** |
-| M2 | 拨号（QMI/MBIM 原生 proto + ECM 自定义 proto）、重连阶梯、USB 模式白名单与切换回滚状态机 | ⏳ 待做 |
+| M2 | 拨号（QMI/MBIM 原生 proto + ECM 自定义 proto）、重连阶梯、USB 模式白名单与切换回滚状态机 | ⚠️ **代码完成 + 主机侧两轮自测通过，真机不可验**：`25-usbmode-dial-test.sh` **341 checks / 0 fail**（`usbmode.c` + `net.c` 由真实编译器驱动，期望值有一半来自 node 真跑 `api.js` 的**独立实现**，不是抄副本）；`26-m2-structural-check.sh` **67 checks / 0 fail**（两个状态机、netifd proto、装机前检、ACL/菜单可达性——grep 级，只答「接线被拆掉会不会有人发现」）。**本机无 SIM ⇒ 拨号成功路径与模式切换都产生不出成功形态**，按设计模式切换永不自动执行。**.ipk 尚未编出、未装机** |
 | M3 | 短信（PDU 编解码、收发、存储、长短信）。**原计划的 `sendat` prompt 补丁已判定不需要**，改为在 `atq.c` 内做两阶段事务 | ⚠️ **代码完成 + 主机侧自测通过 + 已装机验收，但真机收发不可验**：自测 104 checks / 0 fail，设备侧 `DEVICE VERIFY OK`；本机无 SIM，`AT+CMGS`/`AT+CMGL` 整条收发路径产生不出成功形态，只验到「无卡时优雅降级」。见 `docs/AT-FACTS.md` §12 |
 | **M4** | 频段锁定 / 小区锁定 / 邻区 | ✅ **已完成并在真机验收**（band lock 写路径已验通；cell lock 只写不生效，因为没有传统复位模式，UI 如实说明） |
 | **M5** | GNSS | ✅ **已完成并在真机验收**（`DEVICE VERIFY OK`；解析器主机侧自测 239 checks / 0 fail）。开引擎对连接性影响实测为 0；NMEA 走 AT 口，读路径已在真机跑过真实帧（8 句 / 184 B / 5 talker / 0 校验错）。本机有天线但室内恒 0 颗星，故「有定位」形态仍由独立校验和帧代偿。见 `docs/AT-FACTS.md` §11（§11.11 = 真机联调） |
-| M6 | i18n、日志导出、CI | ⏳ 待做 |
+| M6 | i18n、日志导出、CI | ⚠️ **代码完成 + 主机侧验收通过，未装机**：**i18n** `po/zh_Hans/fm160.po` **506 条**，覆盖 **482/482 (100%)** —— 全部 8 个页面/脚本 + 菜单标题 + fm160d 发布的两组标签，门禁**判失败**于任何未载入 po 的前端消息。其中 **16 条**带 `msgctxt`（与 luci-base 共享且译文不同的 msgid 会因 `lmo_load_catalog` 的链序让服务端与浏览器读到**相反**的 archive）；撞键扫描后共享键 29 个、译文不同 **0** 个。门禁 **68 项 0 失败**（真实 `po2lmo` 往返、真跑 `cbi.js` 哈希比对、提取基逐文件下限 canary）。**日志导出** 进程内 128 行环形日志 + 只读 `fm160 diagnostics` 返回纯文本支持包，`diag.c` 主机侧 **92 checks / 0 fail**（`tools/hosttest/diag-export-test.sh`），回复键、只读性与页面读取互检 **8/8**。**CI** `.github/workflows/check.yml` 在 ubuntu-latest 上跑 `tools/check.sh`（`STRICT=1`）——**未在真 GitHub runner 上实际跑过** |
 
 **M1 已在真机上验证过一轮**（2026-09-18，H69K + USB 外接 FM160）：代码编译干净，模块身份、USB 模式、注网、信号、小区命令全部实测，凡与真机不符的解析逻辑都已修正，见 `docs/HARDWARE-PROBE.md`。
 
@@ -38,19 +38,34 @@ fm160-luci/
 ├── fm160d/             策略层：本项目原创（C / uloop / libubus）
 │   ├── src/
 │   │   ├── fm160d.h        类型与接口
-│   │   ├── main.c          ubus 连接、事件订阅、配置、生命周期
+│   │   ├── main.c          ubus 连接、事件订阅、配置、生命周期 —— 含进程内日志环（M6）
 │   │   ├── atq.c           AT 优先级队列 + sendat 异步客户端 + 两阶段事务（prompt → payload）
 │   │   ├── sched.c         分级轮询 / 抖动 / 退避 / 静默窗 / 熔断 / 端口发现
 │   │   ├── state.c         状态快照 + sysfs 流量计数 + ubus 推送
 │   │   ├── cmds.c          FM160 命令与解析（身份 / 注网 / 信号 / 小区 / GNSS+NMEA）
 │   │   ├── pdu.c / pdu.h   SMS PDU 编解码（GSM7 / UCS2 / UDH 拼接）— 只依赖 libc，可单独主机侧测试
 │   │   ├── sms.c           SMS（M3）：存储、去重、持久化、setup 状态机、收发、解析器
-│   │   └── ubus_methods.c  ubus 对象 "fm160"
+│   │   ├── usbmode.c/.h    USB 模式表 + 风险判定（M2）— 只依赖 libc
+│   │   ├── net.c / net.h   拨号阶梯、PDP/地址解析（M2）— 只依赖 libc（+ usbmode.h）
+│   │   ├── dialer.c        拨号状态机（M2）
+│   │   ├── modesw.c        USB 模式切换状态机 + 回滚（M2）
+│   │   ├── diag.c / diag.h 诊断支持包：状态 + 日志环 → 纯文本（M6）— 无 I/O、无全局、时钟由调用方传入
+│   │   └── ubus_methods.c  ubus 对象 "fm160"（22 个方法）
 │   └── files/etc/          init.d / config / hotplug.d / uci-defaults
-└── luci-app-fm160/     表现层：本项目原创（LuCI JavaScript）
-    ├── htdocs/luci-static/resources/fm160/api.js
-    ├── htdocs/luci-static/resources/view/fm160/{overview,signal,cells,gnss,sms,debug}.js
-    └── root/usr/share/{luci/menu.d,rpcd/acl.d}/luci-app-fm160.json
+├── luci-app-fm160/     表现层：本项目原创（LuCI JavaScript）
+│   ├── htdocs/luci-static/resources/fm160/api.js
+│   ├── htdocs/luci-static/resources/view/fm160/{overview,signal,cells,dial,gnss,sms,debug}.js
+│   ├── po/zh_Hans/fm160.po     简体中文（140 条，编译成 fm160.zh-cn.lmo）
+│   └── root/usr/share/{luci/menu.d,rpcd/acl.d}/luci-app-fm160.json
+├── tools/              门禁（每个都能单独跑；`sh tools/check.sh` 是总入口）
+│   ├── check.sh            总编排；STRICT=1 时 SKIP 记为失败（CI 用这个）
+│   ├── cccheck/            真 libubox/libubus 头文件下的编译 + 符号表 + OBJS/版本一致性 + CRLF
+│   ├── jscheck/            前端语法 + api.js 导出 + 「daemon/声明/授权」三清单契约
+│   ├── i18n/               .po 形状、哈希一致、po2lmo 往返、跨目录撞键、覆盖率
+│   ├── hosttest/           diag.c 的主机侧编译并运行测试（需要 Linux 上的 cc）
+│   └── lib/tooling.sh      共用助手（路径转换、删除走 python 避开沙箱）
+├── .github/workflows/  CI：ubuntu-latest 上跑 tools/check.sh（STRICT=1）
+└── docs/{AT-FACTS.md, DESIGN.md, PLAN.md}
 ```
 
 ## 分层
@@ -212,6 +227,13 @@ ubus call fm160 at '{"cmd":"AT+GTUSBMODE=?"}'
 # 3. fm160d 自己的状态
 ubus call fm160 status | jsonfilter -e '@.port' -e '@.at_state' -e '@.usbmode'
 logread -e fm160d | tail -40
+
+# 3b. 支持包（M6）。★ 这是**排障入口**：状态 + fm160d 自己记住的日志，
+#     一次调用全拿到，且**不碰模组**（不会改动静默窗或打乱轮询时序），
+#     所以它可以在一台已经在出问题的机器上安全地执行。
+#     文本里含 IMEI / SN / ICCID，公开贴出前要删。
+ubus call fm160 diagnostics | jsonfilter -e '@.bytes' -e '@.log_lines' -e '@.log_total'
+ubus call fm160 diagnostics | jsonfilter -e '@.text' | sed 's/\\n/\n/g'
 
 # 4. 短信：先看 setup 有没有被模组接受（无卡时这一步就会失败，属正常）
 ubus call fm160 status | jsonfilter -e '@.sms'

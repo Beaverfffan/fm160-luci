@@ -628,6 +628,23 @@ static void housekeeping(struct uloop_timeout *t)
 	 */
 	fm160_sms_setup_tick();
 
+	/*
+	 * M2.  Both of these run BEFORE the "no port" and "suspended" returns
+	 * below, and that placement is the whole point for both of them:
+	 *
+	 *   the dialer - a dial sequence is a sequence, not a poll, so it has
+	 *   no tier; and while the link is coming up the circuit breaker may
+	 *   well have parked the polls, which must not stop the dial.
+	 *
+	 *   the mode switch - the state it exists to detect is "there has been
+	 *   no AT port for two minutes", so a guard that returned whenever the
+	 *   port was missing would make it undetectable.  It is also the only
+	 *   user of `pending_since_ms`, which is why it keeps its own clock
+	 *   across a daemon restart.
+	 */
+	fm160_dial_tick();
+	fm160_modesw_tick();
+
 	if (now < poll_suspend_until_ms)
 		return;
 	if (g_state.at_state == 2)

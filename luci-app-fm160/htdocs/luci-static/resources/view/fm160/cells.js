@@ -336,7 +336,7 @@ return view.extend({
 					self.paint(self.state);
 					return Promise.resolve();
 				})
-			}, _('Clear selection'))
+			}, _('Clear selection', 'fm160 band lock action'))
 		]));
 
 		return E('div', { 'class': 'cbi-section' }, [
@@ -412,7 +412,7 @@ return view.extend({
 		var manual = E('div', { 'style': 'margin-top:8px' }, [
 			E('p', { 'class': 'hint' },
 				_('Manual entry. The modem accepts %s and %s for the mode; its own capability answer lists a third value that the manual does not define, and this page will not write it.')
-					.format('0 (' + _('off') + ')', '1 (' + _('on') + ')')),
+					.format('0 (' + _('off', 'fm160 off state') + ')', '1 (' + _('on') + ')')),
 			disable
 		]);
 
@@ -449,7 +449,7 @@ return view.extend({
 			E('th', { 'class': 'th' }, _('RAT')),
 			E('th', { 'class': 'th' }, 'EARFCN'),
 			E('th', { 'class': 'th' }, 'PCI'),
-			E('th', { 'class': 'th' }, _('Band')),
+			E('th', { 'class': 'th' }, _('Band', 'fm160 band column')),
 			E('th', { 'class': 'th' }, 'RSRP'),
 			E('th', { 'class': 'th' }, _('Action'))
 		]) ];
@@ -571,7 +571,7 @@ return view.extend({
 			var rows = [
 				E('tr', { 'class': 'tr' }, [
 					E('th', { 'class': 'th' }, _('Cell')),
-					E('th', { 'class': 'th' }, _('Band')),
+					E('th', { 'class': 'th' }, _('Band', 'fm160 band column')),
 					E('th', { 'class': 'th' }, 'PCI'),
 					E('th', { 'class': 'th' }, _('Frequency')),
 					E('th', { 'class': 'th' }, _('State')),

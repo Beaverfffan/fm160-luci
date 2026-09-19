@@ -53,7 +53,7 @@ per line. That is the dangerous kind of difference: it compiles, packages and
 installs cleanly, and then the init script never starts on the device, because
 the kernel reads its interpreter as `"/bin/sh /etc/rc.common\r"`. Normalising to
 LF fixed the bug and restored byte-identity with upstream in the same step.
-`_tools/cccheck/eolcheck.py` now guards against a repeat.
+`tools/cccheck/eolcheck.py` now guards against a repeat.
 
 ## What is modified, and what is not
 

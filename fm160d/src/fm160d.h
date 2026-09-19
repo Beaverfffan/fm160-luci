@@ -26,6 +26,35 @@
 #include <libubus.h>
 
 #include "pdu.h"
+/*
+ * M2's two pure layers are included here rather than forward-declared, because
+ * struct fm160_state EMBEDS their enums and constants.  Both are libc-only
+ * (see their headers), so this pulls in no libubox dependency, and the
+ * direction is one-way: neither of them knows fm160d.h exists, which is what
+ * lets the host-side test compile them on their own.
+ */
+#include "net.h"
+#include "usbmode.h"
+/*
+ * diag.h pulls in nothing but <stdint.h>/<stddef.h> and forward-declares the
+ * two structs it works on, so including it here costs no ordering constraint.
+ * diag.c is the only file that needs the real definitions, and it gets them by
+ * including this header.
+ */
+#include "diag.h"
+
+/*
+ * The daemon's own version, reported in the diagnostics bundle.
+ *
+ * It is duplicated from PKG_VERSION in ../Makefile because a -D on the
+ * toolchain command line is the only other way to get it here, and that path
+ * cannot be checked on the workstation at all (no make).  tools/check.sh
+ * asserts that the two strings are equal, so the duplication is enforced
+ * rather than trusted - a stale version here would make every diagnostic
+ * report that a maintainer reads slightly wrong, in the one artefact they
+ * consult precisely because they have lost track of what is running.
+ */
+#define FM160_VERSION       "0.1.0"
 
 #define FM160_VENDOR_ID     "2cb7"   /* Fibocom */
 #define FM160_PORT_MAX      64
@@ -622,6 +651,135 @@ struct fm160_sms_state {
 	bool busy;                     /* a send or a fetch is in flight */
 };
 
+/* ------------------------------------------------------------------ */
+/* M2: the data plane and the USB profile switch                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Why the data plane is a state machine and not a script
+ *
+ * The vendor's dial-up document gives a linear recipe, and the linear part is
+ * reproduced exactly (see net.h).  What a recipe cannot express is that every
+ * step can also say "not yet": registration takes tens of seconds, activation is
+ * documented as taking up to 210 s, and the first four steps all fail
+ * differently on a modem with no card.  So each rung has a deadline of its own,
+ * a failure climbs a ladder rather than restarting instantly (DESIGN 4.3), and
+ * what the modem actually said is kept verbatim for the page to show.
+ *
+ * Only ECM is dialled from here.  QMI and MBIM are dialled by the kernel stack
+ * through uqmi/umbim, and duplicating that would mean two things racing to
+ * activate the same PDP context; fm160_dial_start() refuses those profiles and
+ * says which protocol to use instead.
+ *
+ * `step` is where the ladder IS, and never where it briefly was: the in-flight
+ * marker is `running`, a separate field, because a snapshot that said "busy"
+ * every time a transaction was out would hide the one thing the page is showing
+ * - which rung is being waited on.  (NET_STEP_BUSY in net.h is the placeholder
+ * that idea would have used; this implementation never enters it.)
+ */
+struct fm160_dial_state {
+	bool wanted;                 /* the user asked for the link            */
+	enum fm160_net_step step;
+	enum fm160_dial_kind kind;   /* how the ACTIVE profile is dialled      */
+	bool kind_known;
+
+	int  cid;
+	enum fm160_net_pdp pdp;
+	char apn[FM160_NET_APN_MAX];
+
+	bool up;
+	char addr[FM160_NET_ADDR_MAX];
+	char dns1[FM160_NET_ADDR_MAX];
+	char dns2[FM160_NET_ADDR_MAX];
+	char pdp_in_use[8];          /* as the modem spelled it, for evidence  */
+
+	/* Which of AT+GTWWAN / AT+GTRNDIS this modem answers.  -1 until probed:
+	 * the vendor's two documents contradict each other (AT-FACTS 2.1), so
+	 * this is a fact about the unit, discovered at run time. */
+	int  verb;
+
+	int  attempt;                /* rung of the refresh ladder             */
+	uint64_t attempt_ms;         /* when the current attempt began         */
+	uint64_t next_try_ms;
+	int  ip_polls;
+	/* Which sub-step of the current rung is out.  The activation rung needs
+	 * one (probe +GTWWAN=? / probe +GTRNDIS=? / deactivate first / activate)
+	 * and the registration rung needs one (CREG / CGREG / CEREG), and both
+	 * are the same kind of thing: a rung that is several transactions long
+	 * and has to be resumable between them. */
+	int  sub;
+	bool running;                /* an AT transaction of the ladder is out */
+	bool sim_ready;              /* AT+CPIN? said READY at least once      */
+	/* The context has been up at least once during this attempt.  Recorded
+	 * because re-activating a context that is still half-open is not the
+	 * same operation as activating a fresh one: DESIGN 4.3's "light reset"
+	 * is exactly the deactivate-then-activate pair, and it is only owed
+	 * when there was something to deactivate. */
+	bool was_up;
+
+	/* uci, re-read on every config reload */
+	bool allow_reset;            /* may the ladder end in AT+CFUN=1,1      */
+	bool autostart;              /* dial as soon as the port is there      */
+	bool autostart_done;         /* one attempt per ident run              */
+	bool config_error;           /* bad APN or cid: retrying cannot help   */
+
+	uint64_t last_ok_ms;
+	char last_error[FM160_STR_MAX];
+
+	/* The evidence DESIGN 4.3 asks for.  A daemon that silently resets a
+	 * modem forever turns a bad card into a router that reboots its modem
+	 * every few minutes, and hides the fault while doing it; the count is
+	 * kept so that stopping is a decision with a number behind it. */
+	int  resets_in_window;
+	int  resets_total;
+	bool healing_stopped;
+
+	int  starts, failures;
+};
+
+/*
+ * The USB profile switch (DESIGN 5).
+ *
+ * The decision itself lives in usbmode.c and is pure; this is the part that
+ * talks to the modem, and it exists mainly to make the two irreversible mistakes
+ * impossible:
+ *
+ *   - applying a target that was never checked against the device list
+ *   - losing the ability to say what the profile was before the switch
+ *
+ * The rollback point is written to uci BEFORE the write, because after
+ * AT+GTUSBMODE= the modem may re-enumerate and there is no second chance to
+ * record where we came from.
+ */
+enum fm160_modesw_state {
+	MODESW_IDLE = 0,      /* nothing pending                          */
+	MODESW_CAPS,          /* reading AT+GTUSBMODE=?                    */
+	MODESW_APPLY,         /* the write is in flight                    */
+	MODESW_VERIFY,        /* waiting for the modem to come back        */
+	MODESW_STUCK,         /* no AT port after a switch: stop, do not spin */
+};
+
+struct fm160_modesw {
+	enum fm160_modesw_state st;
+	int  current;                /* -1 until AT+GTUSBMODE? answered        */
+	int  target;                 /* -1 when nothing was requested          */
+	int  rollback_mode;          /* where we came from, for the one retry  */
+
+	bool caps_valid;
+	int  supported[FM160_USBMODE_SUP_MAX];
+	int  supported_n;
+
+	bool pending;                /* a switch was applied and not verified  */
+	uint64_t pending_since_ms;
+	uint64_t applied_ms;
+	int  verify_result;          /* 0 unverified, 1 arrived, -1 rolled back */
+	bool rolled_back;
+
+	bool busy;
+	uint64_t last_ok_ms;
+	char last_error[FM160_STR_MAX];
+};
+
 struct fm160_state {
 	/* port */
 	char port[FM160_PORT_MAX];
@@ -697,6 +855,13 @@ struct fm160_state {
 	 * write path, not three settings on one screen. */
 	struct fm160_sms_state      sms;
 
+	/* M2: the data plane and the USB profile switch.  Two tables rather than
+	 * one: "how the link is dialled" and "which physical profile the modem
+	 * is in" are different questions with different failure modes, and the
+	 * second can take the entire management channel away. */
+	struct fm160_dial_state     dial;
+	struct fm160_modesw         modesw;
+
 	/* netdev counters (read from sysfs, costs zero AT) */
 	char netdev[32];
 	uint64_t rx_bytes, tx_bytes;
@@ -759,6 +924,34 @@ uint64_t fm160_now_ms(void);
 /* ------------------------------------------------------------------ */
 
 void fm160_config_load(void);
+
+/* Read one option of the fm160.main section.  Returns 0 on success. */
+int  fm160_uci_get(const char *option, char *out, size_t outlen);
+/* The same, for one of the state sections (dial / switch). */
+int  fm160_uci_get_section(const char *section, const char *option,
+			   char *out, size_t outlen);
+
+/*
+ * Write one option of an arbitrary section and commit.  Returns 0 on success.
+ *
+ * Deliberately the ONLY write path into uci, and deliberately narrow: two
+ * pieces of state have to outlive a restart, and both of them are the record of
+ * something that cannot be observed afterwards.
+ *
+ *   - the mode-switch rollback point.  After AT+GTUSBMODE the modem may
+ *     re-enumerate, so this is written BEFORE the command: once it has been
+ *     sent there is no second chance to record where we came from.
+ *   - the module-reset ledger (DESIGN 4.3).  "Three resets in 24 h and then
+ *     stop" is only a limit if the count survives a daemon restart, and a
+ *     permanent `while true; do reset; done` is exactly the failure this is
+ *     meant to prevent.
+ *
+ * The value is checked against a conservative character set first: it reaches
+ * a shell, and refusing a value is better than quoting one.  `section` and
+ * `option` are callers' literals and are not checked.
+ */
+int  fm160_uci_set(const char *section, const char *option, const char *value);
+int  fm160_uci_set_int(const char *section, const char *option, long long v);
 
 /* ------------------------------------------------------------------ */
 /* atq.c - AT queue over at-daemon                                      */
@@ -952,6 +1145,44 @@ void fm160_parse_cmgl(const char *resp);
 void fm160_parse_cmgs(const char *resp);
 
 /* ------------------------------------------------------------------ */
+/* dialer.c - the ECM data plane                                        */
+/* ------------------------------------------------------------------ */
+
+/* Reset the state and read the persistent reset ledger. */
+void fm160_dial_init(void);
+/* The state machine's only clock.  Driven from housekeeping, like the SMS
+ * setup: there is no poll tier behind this, because a dial sequence is a
+ * sequence and not a poll. */
+void fm160_dial_tick(void);
+
+/* Take the APN/pdp/cid from uci.  Safe to call on every config reload. */
+void fm160_dial_configure(const char *apn, const char *pdp, int cid,
+			  bool allow_reset, bool autostart);
+
+/* Ask for the link.  Returns 0, -EINVAL when no APN is configured and
+ * -ENOTSUP when the active profile is not one this daemon dials. */
+int  fm160_dial_start(void);
+/* Take the link down with AT+GTWWAN=0,<cid>.  Pulling the cable or powering
+ * the module down is NOT a disconnect (the vendor is explicit about this). */
+int  fm160_dial_stop(void);
+/* True when the current profile is one this daemon dials. */
+bool fm160_dial_usable(void);
+
+/* ------------------------------------------------------------------ */
+/* modesw.c - the USB profile switch                                    */
+/* ------------------------------------------------------------------ */
+
+void fm160_modesw_init(void);
+void fm160_modesw_tick(void);
+/* Ask to switch.  Returns 0 when the request was accepted for execution, or a
+ * negative errno; the refusal's reason is in the snapshot either way. */
+int  fm160_modesw_apply(int target, bool advanced_ok);
+/* Record the capability list (from AT+GTUSBMODE=?) and the active profile
+ * (from AT+GTUSBMODE?).  Called by the identity chain. */
+void fm160_modesw_note_caps(const int *modes, int n);
+void fm160_modesw_note_current(int mode);
+
+/* ------------------------------------------------------------------ */
 /* ubus_methods.c                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -963,6 +1194,61 @@ void fm160_ubus_methods_init(void);
 
 void fm160_log(int priority, const char *fmt, ...)
 	__attribute__((format(printf, 2, 3)));
+
+/*
+ * The remembered log.
+ *
+ * fm160_log() has always done exactly one thing: hand the line to vsyslog().
+ * The consequence is that fm160d's own log is only ever as durable as logd's
+ * ring, which on this box is shared with every other daemon, is lost at the
+ * first reboot, and cannot be read at all from inside the process.  That made
+ * "send me the log" a request the daemon could not answer about itself, and a
+ * bug report therefore arrived as "the page went blank" with nothing else.
+ *
+ * So a fixed-size ring is kept beside the syslog call.  Deliberately NOT a
+ * file: a log file on the overlay needs rotation, a rotation that fails fills
+ * the flash, and this is a router.  Deliberately not in /tmp either - tmpfs is
+ * where the interesting minutes go when RAM is what ran out.
+ *
+ * The ring is filled AFTER the level gate, i.e. it contains exactly what syslog
+ * received and nothing more.  That keeps the "log level" setting meaningful for
+ * the export too: what you would have seen in logread is what you download.
+ * The level in force is reported in the bundle, so a DEBUG line that is absent
+ * is explained by the header rather than being a mystery.
+ *
+ * FM160_LOG_LINE_MAX is a variable-length field inside a fixed-size record, so
+ * a line longer than it is truncated and marked; the export says "(truncated)"
+ * on that line rather than silently shortening it.
+ */
+#define FM160_LOG_RING_LINES 128
+#define FM160_LOG_LINE_MAX   192
+
+/* Sizing for the diagnostics buffer.  See diag.h for the two halves. */
+#define FM160_DIAG_BUF_MAX  (FM160_DIAG_HEAD_MAX + \
+			     FM160_LOG_RING_LINES * FM160_DIAG_LOG_LINE_MAX)
+
+struct fm160_log_rec {
+	uint64_t at_ms;                  /* monotonic, when it was logged     */
+	int      prio;                   /* LOG_ERR..LOG_DEBUG               */
+	bool     truncated;              /* did not fit in msg[]              */
+	char     msg[FM160_LOG_LINE_MAX];
+};
+
+/* How many lines the ring holds right now (0..FM160_LOG_RING_LINES). */
+size_t fm160_log_ring_count(void);
+/* How many lines have ever been logged, so the export can say how many were
+ * dropped.  Counting them is the difference between "the log looks short" and
+ * "the log IS short because 400 lines went past". */
+uint64_t fm160_log_ring_total(void);
+/* The i-th remembered line, oldest first, or NULL past the end.  The pointer
+ * stays valid until the next fm160_log() call, so a reader must not log while
+ * it walks the ring. */
+const struct fm160_log_rec *fm160_log_ring_at(size_t i);
+
+/* The effective log level, and how long the daemon has been up.  Both live in
+ * main.c and are read by the diagnostics handler. */
+int      fm160_log_level(void);
+uint64_t fm160_uptime_ms(void);
 
 /* <syslog.h> defines LOG_ERR/LOG_INFO/LOG_DEBUG with these exact values; the
  * guards keep this header usable both with and without it. */

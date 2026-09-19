@@ -37,7 +37,7 @@
 
 `src/` 与 `files/` 与上游逐字节一致（blob 哈希见 `NOTICE.md`）。
 
-> ⚠️ **行尾必须是 LF。** `files/etc/init.d/ubus-at-daemon` 曾经是 CRLF（386 → 411 字节，每行多一个 `\r`）。这种文件能编译、能打包、能安装，然后在设备上**静默不启动**——内核把解释器读成 `"/bin/sh /etc/rc.common\r"`，那个路径不存在。已修正为 LF（因此现在与上游逐字节一致），并加了 `_tools/cccheck/eolcheck.py` 防回归。
+> ⚠️ **行尾必须是 LF。** `files/etc/init.d/ubus-at-daemon` 曾经是 CRLF（386 → 411 字节，每行多一个 `\r`）。这种文件能编译、能打包、能安装，然后在设备上**静默不启动**——内核把解释器读成 `"/bin/sh /etc/rc.common\r"`，那个路径不存在。已修正为 LF（因此现在与上游逐字节一致），并加了 `tools/cccheck/eolcheck.py` 防回归。
 >
 > ⚠️ 构建时唯一的警告来自上游 `src/main.c:3`：它无条件 `#define ARRAY_SIZE`，而 `libubox/utils.h` 用 `#ifndef` 守卫自己的同名宏。两个定义**逐字相同**，所以只是噪声。**有意不修**——改了就不再是逐字节的 vendor 副本，`NOTICE.md` 的溯源也就失效了，代价换不来收益。
 

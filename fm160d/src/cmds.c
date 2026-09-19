@@ -16,6 +16,7 @@
 #include <syslog.h>
 
 #include "fm160d.h"
+#include "usbmode.h"
 
 /* ------------------------------------------------------------------ */
 /* small CSV helpers                                                    */
@@ -336,10 +337,20 @@ void fm160_parse_greg(const char *resp, const char *prefix, int *slot)
 
 void fm160_parse_usbmode(const char *resp)
 {
-	char line[FM160_STR_MAX];
+	int mode = fm160_usbmode_parse_current(resp);
 
-	if (fm160_resp_find(resp, "+GTUSBMODE", line, sizeof(line)))
-		g_state.usb_mode = csv_int(line, 0, -1);
+	/* Only the bare "AT+GTUSBMODE: 32" form is accepted, and the strictness
+	 * is the point: the capability answer to AT+GTUSBMODE=? begins with the
+	 * same token and its first number is the first element of a RANGE
+	 * ("(17-18,20-21,24,29-33)"), so a loose integer scrape reads the
+	 * current profile as 17 on a modem that is in 32.  usbmode.c owns that
+	 * rule; this function only routes the answer to it. */
+	if (mode < 0)
+		return;
+	g_state.usb_mode = mode;
+	/* The switch layer keeps the profile it may have to return to.  One
+	 * reader, one writer: this is the only place either copy is set. */
+	fm160_modesw_note_current(mode);
 }
 
 /* Column index map for one GTCCINFO row; -1 = the column does not exist in
@@ -520,6 +531,7 @@ static void ident_store(struct at_req *req, enum at_status status,
 enum ident_kind {
 	IDENT_STR = 0,        /* copy the first value line into dst          */
 	IDENT_USBMODE,        /* +GTUSBMODE: <n>                             */
+	IDENT_USBMODE_CAPS,   /* +GTUSBMODE: (17-18,20-21,24,29-33)          */
 	IDENT_GTACT_CAPS,     /* +GTACT: (…),(…) x9                          */
 	IDENT_CELLLOCK_CAPS,  /* +GTCELLLOCK: ranges x7                      */
 	/* M5 */
@@ -569,6 +581,14 @@ static struct ident_item ident_plan[] = {
 	 * a long timeout inside the quiet window, never in the poll loop. */
 	{ "AT+ICCID",      g_state.iccid,        sizeof(g_state.iccid),        IDENT_STR },
 	{ "AT+GTUSBMODE?", NULL,                 0,                            IDENT_USBMODE },
+	/* The second gate of DESIGN 5.1.  A target has to be in this list AND
+	 * in the hard whitelist, and this read is the only source of the first
+	 * half - which is why it is here, in the once-per-boot chain, and not
+	 * in a poll tier: a permission a poll loop could lose is not a
+	 * permission.  It is also read at boot for the same reason the M4 and
+	 * M5 capability lists are: a module that will not say what it supports
+	 * never gets written to. */
+	{ "AT+GTUSBMODE=?", NULL,                0,                            IDENT_USBMODE_CAPS },
 	/* M4.  Both answer in 21 ms / 16 ms on the live module. */
 	{ "AT+GTACT=?",    NULL,                 0,                            IDENT_GTACT_CAPS },
 	{ "AT+GTCELLLOCK=?", NULL,               0,                            IDENT_CELLLOCK_CAPS },
@@ -691,6 +711,26 @@ static void ident_store(struct at_req *req, enum at_status status,
 		case IDENT_USBMODE:
 			fm160_parse_usbmode(response);
 			break;
+		case IDENT_USBMODE_CAPS: {
+			int list[FM160_USBMODE_SUP_MAX];
+			int n = fm160_usbmode_parse_list(response, list,
+							 FM160_USBMODE_SUP_MAX);
+
+			/* A list this parser cannot read is NOT the same as an
+			 * empty one, and neither of them is "never answered":
+			 * the first leaves caps_valid false (every switch is
+			 * refused as LIST_UNKNOWN) rather than claiming the
+			 * modem offers nothing.  Refusing harder, with a
+			 * different reason, is the safe direction. */
+			if (n < 0)
+				fm160_log(LOG_WARNING,
+					  "AT+GTUSBMODE=? answered in a form this "
+					  "parser does not understand; USB profile "
+					  "changes stay disabled");
+			else
+				fm160_modesw_note_caps(list, n);
+			break;
+		}
 		case IDENT_GTACT_CAPS:
 			fm160_parse_gtact_caps(response);
 			break;
@@ -745,6 +785,16 @@ void fm160_ident_reset(void)
 	g_state.iccid[0] = '\0';
 	g_state.usb_mode = -1;
 	g_state.ident_done = false;
+
+	/* M2.  The profile the switch may have to return to goes with the
+	 * identity it was read from, and so does the list that licenses a
+	 * switch at all.  A pending switch is deliberately NOT touched here:
+	 * its target and rollback point live in uci and have to survive a
+	 * restart, which is the only reason a switch applied just before the
+	 * daemon died is still verified on the next boot. */
+	g_state.modesw.current = -1;
+	g_state.modesw.caps_valid = false;
+	g_state.modesw.supported_n = 0;
 
 	/* Capabilities are invalidated with the identity they belong to.  If the
 	 * re-read fails the write paths are blocked, which is the safe

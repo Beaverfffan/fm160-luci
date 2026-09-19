@@ -63,6 +63,10 @@ define Package/fm160d/install
 	$(INSTALL_BIN) ./files/etc/hotplug.d/tty/10-fm160-port $(1)/etc/hotplug.d/tty/
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/etc/uci-defaults/99-fm160 $(1)/etc/uci-defaults/
+	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) ./files/usr/libexec/fm160-preflight.sh $(1)/usr/libexec/
+	$(INSTALL_DIR) $(1)/lib/netifd/proto
+	$(INSTALL_BIN) ./files/lib/netifd/proto/fm160.sh $(1)/lib/netifd/proto/
 endef
 
 $(eval $(call BuildPackage,fm160d))

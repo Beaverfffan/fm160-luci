@@ -114,10 +114,10 @@ return view.extend({
 						E('th', { 'class': 'th' }, _('RAT')),
 						E('th', { 'class': 'th' }, _('PLMN')),
 						E('th', { 'class': 'th' }, 'TAC'),
-						E('th', { 'class': 'th' }, _('Cell ID')),
+						E('th', { 'class': 'th' }, _('Cell ID', 'fm160 cell field')),
 						E('th', { 'class': 'th' }, 'EARFCN'),
 						E('th', { 'class': 'th' }, 'PCI'),
-						E('th', { 'class': 'th' }, _('Band')),
+						E('th', { 'class': 'th' }, _('Band', 'fm160 band column')),
 						E('th', { 'class': 'th' }, 'RSRP'),
 						E('th', { 'class': 'th' }, 'RSRQ'),
 						E('th', { 'class': 'th' }, 'SINR')
@@ -146,7 +146,7 @@ return view.extend({
 				E('th', { 'class': 'th' }, _('RAT')),
 				E('th', { 'class': 'th' }, 'EARFCN'),
 				E('th', { 'class': 'th' }, 'PCI'),
-				E('th', { 'class': 'th' }, _('Band')),
+				E('th', { 'class': 'th' }, _('Band', 'fm160 band column')),
 				E('th', { 'class': 'th' }, 'RSRP'),
 				E('th', { 'class': 'th' }, 'RSRQ'),
 				E('th', { 'class': 'th' }, 'SINR')
@@ -174,7 +174,7 @@ return view.extend({
 					_('Band locking, cell locking and carrier aggregation live on the'), ' ',
 					E('a', { 'href': L.url('admin/fm160/cells') }, _('cells and locking')),
 					' ',
-					_('page.')
+					_('page.', 'fm160 signal page link')
 				])
 			]));
 		}

@@ -20,3 +20,14 @@ at-daemon/src/ubus-at-daemon
 *.swp
 *~
 .DS_Store
+
+# tools/i18n/check.py proves its orphan scan can fail by appending a planted
+# msgid to a copy of the po.  That copy is a test fixture, not a translation.
+*.po.mut
+
+# Verification scratch.  _tmp/ holds the po2lmo built by
+# tools/i18n/build-po2lmo.sh and the .lmo compiled from the shipped .po; both
+# are products of a checkout, not sources.  The caches belong to zig.
+_tmp/
+tools/cccheck/.zigcache/
+tools/cccheck/out/

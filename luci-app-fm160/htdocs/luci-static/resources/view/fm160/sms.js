@@ -498,7 +498,7 @@ return view.extend({
 		}
 
 		return confirmPrompt(_('Send this message?'), [
-			_('To') + ': ' + number,
+			_('To', 'fm160 sms field') + ': ' + number,
 			_('This will be sent as') + ' ' + est.encoding + ', ' + est.parts + ' ' + _('segment(s)') + '.',
 			_('A sent message cannot be recalled.'),
 			_('Nothing is sent until you confirm.')
@@ -546,7 +546,7 @@ return view.extend({
 	handleDelete: function(m) {
 		var self = this;
 		var lines = [
-			_('To') + ': ' + (m.number || '-'),
+			_('To', 'fm160 sms field') + ': ' + (m.number || '-'),
 			m.index_known
 				? _('This removes the modem\'s copy (AT+CMGD=%d) as well as the copy held here.').format(m.index)
 				: _('The modem has no copy of this one; only the entry held here is removed.'),
@@ -625,7 +625,7 @@ return view.extend({
 		}
 
 		return E('div', {}, [
-			E('h3', {}, _('Diagnostics')),
+			E('h3', {}, _('Diagnostics', 'fm160 diagnostics heading')),
 			E('table', { 'class': 'table' }, E('tbody', {}, rows)),
 			E('p', { 'class': 'cbi-section-descr' },
 				_('The two multi-segment counters are the evidence for one specific question: whether a PDU that spans more than one USB packet can time out on this kernel. They are counted rather than assumed, so a workaround is only worth writing if the second number is non-zero.'))

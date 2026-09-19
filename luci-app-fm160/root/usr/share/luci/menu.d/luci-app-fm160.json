@@ -10,7 +10,7 @@
 		}
 	},
 	"admin/fm160/overview": {
-		"title": "概览",
+		"title": "Overview",
 		"order": 10,
 		"action": {
 			"type": "view",
@@ -18,7 +18,7 @@
 		}
 	},
 	"admin/fm160/signal": {
-		"title": "信号",
+		"title": "Signal Quality",
 		"order": 20,
 		"action": {
 			"type": "view",
@@ -26,11 +26,19 @@
 		}
 	},
 	"admin/fm160/cells": {
-		"title": "小区与锁频",
+		"title": "Cells and Locking",
 		"order": 30,
 		"action": {
 			"type": "view",
 			"path": "fm160/cells"
+		}
+	},
+	"admin/fm160/dial": {
+		"title": "Dial and USB",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "fm160/dial"
 		}
 	},
 	"admin/fm160/gnss": {
@@ -42,7 +50,7 @@
 		}
 	},
 	"admin/fm160/sms": {
-		"title": "短信",
+		"title": "SMS",
 		"order": 50,
 		"action": {
 			"type": "view",
@@ -50,7 +58,7 @@
 		}
 	},
 	"admin/fm160/debug": {
-		"title": "AT 调试",
+		"title": "AT Console",
 		"order": 90,
 		"action": {
 			"type": "view",
