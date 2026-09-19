@@ -373,8 +373,20 @@ long fm160_diag_format(const struct fm160_diag_in *in, char *buf, size_t buflen)
 	      bool_str(st->gnss.engine.known), st->gnss.engine.on ? "on" : "off");
 	w_put(&w, "autostart    : %s, done %s\n",
 	      bool_str(st->gnss.autostart), bool_str(st->gnss.autostart_done));
-	w_put(&w, "fix type     : %d, sats used %d\n",
-	      st->gnss.r.fix_type, st->gnss.r.sats_used);
+	/*
+	 * fix_type is in the sentinel domain even though its meaningful values
+	 * are only 1/2/3: fm160_state_init() seeds it with FM160_NONE and it
+	 * stays that way until the first GSA arrives, which on a bench board
+	 * with the engine off is forever.  Printed with a plain %d it leaked
+	 * "fix type     : -1000000" into the bundle -- the exact "reads as a
+	 * measurement" failure this formatter exists to prevent, and the only
+	 * such leak in the whole report.
+	 *
+	 * sats_used is only ever incremented, never seeded, so it cannot hold
+	 * the sentinel and %d is right for it.
+	 */
+	w_put(&w, "fix type     : "); w_int(&w, st->gnss.r.fix_type);
+	w_put(&w, ", sats used %d\n", st->gnss.r.sats_used);
 	w_put(&w, "position     : %s\n", bool_str(st->gnss.r.has_position));
 	/*
 	 * These two are the reason a bench receiver reports no fix, and they

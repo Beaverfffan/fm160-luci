@@ -445,7 +445,12 @@ struct fm160_gnss_reading {
 
 	/* fix, from GSA */
 	int  fix_mode;         /* GSA field 1: 'A' automatic / 'M' manual, 0 none */
-	int  fix_type;         /* GSA field 2: 1 none, 2 2D, 3 3D              */
+	/* fix_type carries FM160_NONE until a GSA arrives -- fm160_state_init()
+	 * seeds it that way and only a real GSA clears it.  So it is in the
+	 * sentinel domain as well as the 1/2/3 domain, and anything that renders
+	 * it (diag.c) must go through w_int() or -1000000 reaches the reader.
+	 * This comment used to name only 1/2/3, which is why it did not. */
+	int  fix_type;         /* GSA field 2: 1 none, 2 2D, 3 3D, or FM160_NONE */
 	int  sats_used;        /* non-empty PRN slots across every GSA         */
 	int  pdop_x10, hdop_x10, vdop_x10;    /* FM160_NONE when empty        */
 

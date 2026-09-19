@@ -561,6 +561,58 @@ int main(void)
 	ok(!has(buf, "-1000000"), "the FM160_NONE sentinel never reaches the page");
 	eqv(buf, "dns", "- / -", "an empty pair of strings is a dash each");
 
+	/*
+	 * --- the state before anything has been read ---------------------
+	 *
+	 * The assertion just above passes trivially.  fill_state() models a modem
+	 * that has ANSWERED, so nothing it fills is in the sentinel domain and
+	 * there is no sentinel for a formatter to mishandle.  The state that
+	 * actually ships on a board with the engine off is the one
+	 * fm160_state_init() builds, where a dozen GNSS fields are seeded with
+	 * FM160_NONE and keep it until the first GSA/GSV arrives.
+	 *
+	 * That is not hypothetical.  fix_type was printed with a plain %d, so a
+	 * real bundle carried "fix type     : -1000000, sats used 0" and the
+	 * first thing to notice was a device-side grep, on the board, after a
+	 * flash.  This fixture makes the same mistake land here instead.
+	 *
+	 * Every field fm160_state_init() seeds is set below, so the two
+	 * assertions are general rather than a list of the leaks known today:
+	 * whichever one of them forgets w_int() shows up, including a field not
+	 * yet printed at all.
+	 */
+	printf("\n== the state before anything has been read ==\n");
+	base_input();
+	fill_state();
+	st.gnss.r.fix_type = FM160_NONE;
+	st.gnss.r.visible_total = FM160_NONE;
+	st.gnss.r.snr_best_db = FM160_NONE;
+	st.gnss.r.pdop_x10 = FM160_NONE;
+	st.gnss.r.hdop_x10 = FM160_NONE;
+	st.gnss.r.vdop_x10 = FM160_NONE;
+	st.gnss.r.quality = FM160_NONE;
+	st.gnss.r.sats_in_use = FM160_NONE;
+	st.gnss.r.alt_dm = FM160_NONE;
+	st.gnss.r.geoid_dm = FM160_NONE;
+	st.gnss.r.speed_cmps = FM160_NONE;
+	st.gnss.r.course_d10 = FM160_NONE;
+	st.gnss.r.gsv_trailing_value = FM160_NONE;
+	st.gnss.cfg.supl_version = FM160_NONE;
+	st.gnss.cfg.constellation = FM160_NONE;
+	st.gnss.cfg.cert = FM160_NONE;
+	st.gnss.cfg.xtra = FM160_NONE;
+	len2 = fm160_diag_format(&in, buf, sizeof(buf));
+	ok(len2 > 0, "the pre-read state formats");
+	ok(!has(buf, "-1000000"), "no seeded sentinel reaches the reader");
+	eqv(buf, "fix type", "-, sats used 0",
+	    "a fix type no GSA has set is a dash, not -1000000");
+	/* And the zero it would have printed instead is still distinct: a GSA
+	 * that really said "no fix" is 1, and 1 must not render as a dash. */
+	st.gnss.r.fix_type = 1;
+	len2 = fm160_diag_format(&in, buf, sizeof(buf));
+	eqv(buf, "fix type", "1, sats used 0",
+	    "a measured fix type is not mistaken for 'not reported'");
+
 	/* Zero and "never" are different answers and must not print alike. */
 	base_input();
 	in.now_ms = 0;
