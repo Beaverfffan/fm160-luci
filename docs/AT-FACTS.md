@@ -1579,3 +1579,121 @@ $ ubus call fm160 sms_delete '{}'               -> Invalid argument # 缺参数�
 
 ⇒ 一般化的规则：**ubus 上任何接收数字的方法，策略里都别声明 INT64**，除非能
 保证调用方永远传大于 2^31 的值。
+
+---
+
+## 13. 无 SIM 时的注册状态（2026-09-19 15:20，无卡台架）
+
+**探针**：`ubus call fm160 at '{"cmd":"…","timeout":N}'`（走 daemon 串行锁；
+手动命令会自带 `atq_set_quiet(QUIET_MANUAL, …, 10)` 静音轮询 10 s）。全部只读，
+**没有改任何模式、没有写 EFS**。
+
+### 13.1 四条注册域全是 `2`
+
+```
+AT+CPIN?     → ERROR                       （裸 ERROR，不是 +CME ERROR: 10）
+AT+CFUN?     → +CFUN: 1,0                  （1 = 全功能；0 = 复位参数）
+AT+CREG?     → +CREG:  0,2                 CS 域
+AT+CGREG?    → +CGREG: 0,2                 PS 域
+AT+CEREG?    → +CEREG: 0,2                 EPS / LTE
+AT+C5GREG?   → +C5GREG: 0,2                5GS / NR
+AT+COPS?     → +COPS: 0                    （没有 <oper> 字段 ⇒ 未选网）
+AT+CSQ       → +CSQ: 24,99                 rssi 24 ≈ −65 dBm ⇒ 射频在收信
+AT+CESQ      → +CESQ: 99,99,255,255,10,45,255,255,255   rsrq idx 10 / rsrp idx 45
+AT+CGATT?    → ERROR
+AT+CPOL?     → ERROR
+AT+GTCAINFO? → OK                          （无 CA 时的正常态，§9.5）
+```
+
+`stat = 2` = **not registered, but MT is currently searching**。四条域**全部是 2**。
+⚠️ `CGATT` / `CPOL` 的裸 `ERROR` 与无卡一致，但**不能单独当判据** —— 分不清
+「无卡所以没有」和「本模块不支持该命令」。
+
+### 13.2 ★★ 结论：无卡时 **LTE 与 5G 都注册不上**
+
+「没卡只注 LTE、不注 5G」这个前提本身不成立 —— 两个都注不上。原因与 RAT 无关：
+**注册是 NAS 层的鉴权过程**，必须由 USIM 提供 IMSI 与长期密钥 K。没有卡，
+无论 EPS 还是 5GS 都会被拒，模块永久停在 `stat=2`。
+
+### 13.3 AS 层确实驻留了 LTE —— 这才是「看起来只注 LTE」的来源
+
+`AT+GTCCINFO?`（只读）逐字：
+
+```
++GTCCINFO:
+LTE service cell:
+1,4,460,11,4580,8048A97,994,129,105,50,-4,45,45,10
+LTE neighbor cell:
+2,4,,,,,994,F4,,38,38,0
+2,4,,,,,73A,BB,,25,25,8
+```
+
+服务小区解出：`IsServiceCell=1`、`rat=4`(LTE)、MCC/MNC = `460/11`（**中国电信**）、
+`band=105 → B5`（850 MHz）。`GTCCINFO` 的 `earfcn`/`cellid` 是十六进制，见 §9.6。
+
+★ **整段没有任何 NR 行。**
+
+**这与 `stat=2` 不矛盾**：`+CEREG: 0,2` 说的是 **NAS 未注册**，而
+`LTE service cell` 说的是 **AS 层（RRC）驻留到的 camped cell** —— 做限制服务
+（limited service / 紧急呼叫）只需读广播，**不需要鉴权**。两层语义不同、同时成立。
+
+**为什么驻留的是 LTE 而不是 NR**：NR 行只在 **NSA（EN-DC）** 下由 LTE 配置 B1/B2
+测量、并添加 SCG 之后才出现；无卡永远进不了 RRC_CONNECTED ⇒ 永远不会有 NR 行。
+SA 驻留则需要 5GS 注册，无卡同样不行。
+
+### 13.4 ★ 但模块**能看到 5G** —— `AT+COPS=?` 扫到了
+
+`AT+COPS=?`（耗时 **29 s**，只读）逐字：
+
+```
++COPS: (1,"460 15","460 15","46015",7),(1,"CHINA MOBILE","CMCC","46000",12),
+(1,"CHINA MOBILE","CMCC","46000",7),(1,"CHN-CT","CT","46011",7),
+(1,"CHN-UNICOM","UNICOM","46001",7),(1,"460 15","460 15","46015",12),
+(1,"CHN-CT","CT","46011",12),(1,"CHN-UNICOM","UNICOM","46001",12),
+,(0,1,2,3,4,5),(0,1,2)
+```
+
+**四个运营商每个都出现两次：`AcT=7` 与 `AcT=12`。**
+
+`<AcT>`（TS 27.007；多来源交叉核实 —— ModemManager 邮件列表引 27.007 v17.5.0、
+Techship 针对 Fibocom 的排障页）：
+
+| AcT | 含义 |
+|---|---|
+| 7 | E-UTRAN（4G LTE） |
+| 11 | NR connected to 5GCN（5G SA） |
+| **12** | **NG-RAN（5G 无线接入）** |
+| 13 | E-UTRA-NR dual connectivity（EN-DC / 5G NSA） |
+
+⇒ **扫描（idle 下主动扫频）能看到 NR；驻留 / 注册（需要 NAS）不行。** 这两件事的
+差别就是「无卡时看不到 5G」的全部成因。
+
+末尾两段是 `+COPS=?` 的**支持枚举**、不是 RAT：`(0,1,2,3,4,5)` = 支持的 `<mode>`
+（0 自动 / 1 手动 / 2 注销 / 3 仅设格式 / 4 手动自动 / 5 手动自动回落），
+`(0,1,2)` = 支持的 `<format>`（长名 / 短名 / 数字）。
+
+### 13.5 ★ 模块的 RAT 配置是 **5G 优先**，不是「只 LTE」
+
+```
+AT+GTRAT?  → +GTRAT: 20,6,3
+AT+GTACT?  → +GTACT: 20,6,3,1,8,101,103,105,108,134,138,139,140,141,501,5028,5041,5078,5079
+```
+
+（两者前三字段一致 ✓，见 §5.1 / §9.2）
+
+`rat=20` = **NR-RAN/WCDMA/LTE 全模**；`pref1=6` = **NR 优先**；`pref2=3` = LTE 次优。
+频段表里 NR 有 **n1/n28/n41/n78/n79 五个**，一个都没关。
+
+⇒ 「只注 LTE」既不是频段限制、也不是 RAT 偏好造成的 —— 这两层都是好的。
+
+### 13.6 可复用的判据
+
+* **`+CSQ` / `+CESQ` 有值 ≠ 已注网** —— 射频收信与 NAS 注册是两件独立的事。
+* **`GTCCINFO` 的 `service cell` ≠ 已注册** —— 那只是 AS 层的 camped cell。
+* 「当前是 4G 还是 5G」不能只看一条命令。★ 无卡时**看 `AcT` 没有意义**，因为注册
+  根本没发生；有卡后应交叉看 `+CEREG?`（AcT=7）与 `+C5GREG?`（AcT=11 / 13）。
+* 无卡台架**能**验：端口与 AT 通路、RAT / 频段配置、PLMN 扫描、GNSS、SMS 的
+  **解析**路径。
+* 无卡台架**不能**验：注网、拨号、拿 IP、SMS 收发（见 §8 / §12）。
+* ⚠️ 只有 `AT+C5GREG=2` 才会让 `+C5GREG?` 带回 AcT 字段。本次**没做** —— 它会改
+  上报设置，属状态变更，不在只读取证范围内。
