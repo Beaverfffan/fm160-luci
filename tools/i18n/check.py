@@ -645,46 +645,72 @@ def compare_lmo(entries, id2hash, id2val):
 # ---------------------------------------------------------------------------
 
 def declared_translations(mk):
-    """The (po directory, lmo alias) pairs FM160_TRANSLATIONS names.
+    """The (alias, po directory) pairs FM160_TRANSLATIONS and FM160_PO define.
 
     Parsed, not substring-matched.  The check this replaced looked for the
-    literal string 'FM160_TRANSLATIONS:=zh_Hans:zh-cn' in the Makefile, which
-    is a *prefix* of a longer list -- so appending 'zh_Hant:zh-tw' to that list
-    left the check green while the entry it added named a locale with no po/
-    directory to compile.  Returns None when the assignment is unparsable.
+    literal string 'FM160_TRANSLATIONS:=zh_Hans:zh-cn' in the Makefile, which is
+    a *prefix* of a longer list -- so appending a language to that list left the
+    check green while the entry it added named a po directory that is not there.
+    The alias is the key and the po directory is a lookup beside it, so an alias
+    whose FM160_PO is missing comes back as an empty directory rather than being
+    silently absent from the list.  Returns None when the list is unparsable.
     """
     m = re.search(r'^FM160_TRANSLATIONS\s*:=\s*(.*?)\s*$', mk, re.M)
     if not m:
         return None
-    return [tuple(e.split(':', 1)) for e in m.group(1).split() if ':' in e]
+    po_of = dict(re.findall(r'^FM160_PO\.(\S+)\s*:=\s*(\S+)\s*$', mk, re.M))
+    return [(a, po_of.get(a, '')) for a in m.group(1).split()]
 
 
 def translation_gaps(mk, po_dir):
-    """Where FM160_TRANSLATIONS and po/ disagree, in both directions.
+    """Where the declared translations and po/ disagree, in both directions.
 
-    `missing` is the dangerous direction: a locale the Makefile names with no
-    po/<locale>/ to back it builds a translation package that installs cleanly
-    and translates nothing -- and because the Makefile's own $(error) fires
-    during the package scan, the scan records the application but not its
-    translations, so the image ships with no .lmo at all.  `extra` is a po/
+    `missing` is the dangerous direction: an alias the Makefile declares whose
+    po/<locale> is absent builds a translation package that installs cleanly and
+    translates nothing -- and because the Makefile's own $(error) fires during
+    the package scan, the scan stops there and records the application but not
+    its translations, so the image ships with no .lmo at all.  `extra` is a po/
     directory that looks maintained and never reaches a device.
     """
     declared = declared_translations(mk)
     if declared is None:
         return None, None
-    names = [n for n, _ in declared]
 
     def pos_in(d):
+        if not d:
+            return []
         full = os.path.join(po_dir, d)
         if not os.path.isdir(full):
             return []
         return [f for f in os.listdir(full) if f.endswith('.po')]
 
-    missing = [n for n in names if not pos_in(n)]
+    missing = [a for a, d in declared if not pos_in(d)]
+    named = [d for _, d in declared if d]
     present = sorted(
         d for d in (os.listdir(po_dir) if os.path.isdir(po_dir) else [])
         if os.path.isdir(os.path.join(po_dir, d)) and d != 'templates')
-    return missing, [d for d in present if d not in names]
+    return missing, [d for d in present if d not in named]
+
+
+def translation_call_is_split(mk):
+    """Whether the $(call) that builds the translation package spans lines.
+
+    True/False for the answer, None when there is no such call to look at --
+    which is a different answer, and also a failure.
+
+    $(call) does not trim its arguments, and a backslash-newline inside a call
+    expands to a space.  A call written across lines therefore passes its
+    arguments with a leading space, so the alias arrives as " zh-cn" and every
+    name built from it inherits one: the package becomes
+    "luci-i18n-fm160- zh-cn", which is a space in a Kconfig symbol and takes
+    `make defconfig` down with it, and the installed file becomes
+    "fm160. zh-cn.lmo", which load_catalog() never matches against its
+    "*.zh-cn.lmo" glob.  The Makefile looks entirely normal either way.
+    """
+    m = re.search(r'\$\(call BuildFm160Translation,([^\n]*)', mk)
+    if m is None:
+        return None
+    return not m.group(1).rstrip().endswith(')')
 
 
 def main():
@@ -1204,67 +1230,89 @@ def main():
         rep.check('Makefile: %s' % what, needle in mk,
                   'expected to find %r' % needle)
 
-    # FM160_TRANSLATIONS is where the Makefile names a locale; po/<locale>/ is
-    # where that locale actually exists.  The two have to agree, and the check
-    # that used to live here -- `'FM160_TRANSLATIONS:=zh_Hans:zh-cn' in mk` --
-    # could not see them disagree, because that string is a *prefix* of a list
-    # that also declared zh_Hant.  A locale was added with no po/ directory to
-    # back it and the gate stayed green; the Makefile's own guard then turned it
-    # into $(error), which is the right outcome at the wrong moment.  It fires
-    # when make reaches package/compile, hours into a build, and -- worse --
-    # during the package scan, which stops at the error: the scan records the
-    # application and not its translations, so fixing the Makefile alone would
-    # still have shipped an image whose LuCI has no Chinese in it at all.
+    # FM160_TRANSLATIONS is where the Makefile declares a translation; po/ is
+    # where one actually exists.  The two have to agree, and the check that used
+    # to live here -- `'FM160_TRANSLATIONS:=zh_Hans:zh-cn' in mk` -- could not
+    # see them disagree, because that string is a *prefix* of a longer list.  A
+    # language was added with no po/ directory to back it and the gate stayed
+    # green; the Makefile's own guard then turned it into $(error), which is the
+    # right outcome at the wrong moment.  It fires when make reaches
+    # package/compile, hours into a build, and -- worse -- during the package
+    # scan, which stops at the error: the scan records the application and not
+    # its translations, so fixing the Makefile alone would still have shipped an
+    # image whose LuCI has no Chinese in it at all.
     assignments = re.findall(r'^FM160_TRANSLATIONS\s*:=', mk, re.M)
     rep.check('Makefile: FM160_TRANSLATIONS is assigned exactly once',
               len(assignments) == 1,
               'found %d assignments; the last one silently wins' % len(assignments))
 
     declared = declared_translations(mk)
-    rep.check('Makefile: FM160_TRANSLATIONS parses as <po dir>:<lmo suffix> pairs',
-              declared is not None, 'no FM160_TRANSLATIONS assignment found')
+    rep.check('Makefile: the list parses and every alias has an FM160_PO',
+              declared is not None and all(d for _, d in declared),
+              'no FM160_TRANSLATIONS assignment, or an alias with no '
+              'FM160_PO.<alias> beside it: %r' % (declared,))
     declared = declared or []
 
     missing, extra = translation_gaps(mk, po_dir)
-    rep.check('Makefile: every locale FM160_TRANSLATIONS names has a po/ directory',
+    rep.check('Makefile: every declared translation has a po/ directory',
               missing is not None and not missing,
               'declared with nothing to compile: %s' % ', '.join(missing or []))
-    rep.check('Makefile: every po/ directory is named in FM160_TRANSLATIONS',
+    rep.check('Makefile: every po/ directory belongs to a declared translation',
               extra is not None and not extra,
               'never packaged: %s' % ', '.join(extra or []))
 
-    for po_name, alias in declared:
-        # The recipe does $(or $(FM160_LANG_TITLE.<locale>),<locale>), so a
-        # missing label is not fatal -- it just puts the raw locale name in the
-        # language picker.
-        rep.check('Makefile: FM160_LANG_TITLE.%s is defined' % po_name,
-                  ('FM160_LANG_TITLE.%s:=' % po_name) in mk,
-                  'the luci.languages label would fall back to %r' % po_name)
+    for alias, po_name in declared:
+        # The recipe writes this straight into the luci.languages option, so an
+        # empty one is a blank entry in the language picker rather than an error.
+        rep.check('Makefile: FM160_LANG_TITLE.%s is defined' % alias,
+                  ('FM160_LANG_TITLE.%s:=' % alias) in mk,
+                  'the luci.languages label would be empty')
         # load_catalog() globs "<basename>.<alias>.lmo", so the alias is a
         # filename component, not a display name.
         rep.check('Makefile: the alias %r is a lower-case lmo suffix' % alias,
                   re.match(r'^[a-z]{2,3}(-[a-z0-9]+)+$', alias) is not None,
                   'fm160.%s.lmo would never be matched by "*.%s.lmo"' % (alias, alias))
 
-    # The gap check is only worth having if it can see the gap it was written
-    # for, so hand it a Makefile that differs from this one by a single line:
-    # one that declares a locale nothing could have a po/ directory for, and
-    # consequently no longer declares the ones that are there.  One substitution
-    # exercises both directions.  If this ever stops reporting both, the two
-    # checks above have quietly become decoration.
+    # The alias reaches $(1) of the template through a $(call), which does not
+    # trim: a backslash-newline inside one expands to a space, so a call split
+    # across lines passes " zh-cn" and every name built from it inherits the
+    # space.  Assert the call is written on one line -- see the helper for what
+    # the space breaks.
+    split = translation_call_is_split(mk)
+    rep.check('Makefile: the translation call is written on one line',
+              split is False,
+              'no such $(call) found' if split is None else
+              'a backslash-newline inside $(call) becomes a space that $(call) '
+              'does not trim, so the alias arrives as " zh-cn" and names the '
+              'package "luci-i18n-fm160- zh-cn", which is not valid Kconfig')
+
+    # Each of these checks is only worth having if it can see the failure it was
+    # written for, so hand each one a Makefile that differs from this one by a
+    # single line.
     planted = re.sub(r'^FM160_TRANSLATIONS\s*:=\s*.*$',
-                     'FM160_TRANSLATIONS:=zz_ZZ:zz-zz', mk, count=1, flags=re.M)
+                     'FM160_TRANSLATIONS:=zz-zz', mk, count=1, flags=re.M)
     rep.check('selftest: the Makefile mutation for the gap check applied',
               planted != mk, 'no FM160_TRANSLATIONS line to mutate')
     p_missing, p_extra = translation_gaps(planted, po_dir)
-    rep.check('selftest: a declared locale with no po/ directory is caught',
-              p_missing == ['zz_ZZ'], 'saw missing=%r' % (p_missing,))
+    rep.check('selftest: a declared translation with no po/ directory is caught',
+              p_missing == ['zz-zz'], 'saw missing=%r' % (p_missing,))
     here = sorted(
         d for d in (os.listdir(po_dir) if os.path.isdir(po_dir) else [])
         if os.path.isdir(os.path.join(po_dir, d)) and d != 'templates')
     rep.check('selftest: a po/ directory no entry names is caught',
               bool(here) and sorted(p_extra or []) == here,
               'saw extra=%r, expected %r' % (p_extra, here))
+
+    # And the whitespace trap, which is invisible by construction: rewrap the
+    # real call onto two lines, the way it was written before, and require the
+    # check to notice.  Nothing about the file looks different afterwards.
+    opens = [l for l in mk.splitlines() if '$(call BuildFm160Translation,' in l]
+    broke = mk.replace(opens[0], opens[0].replace(
+        '$(call BuildFm160Translation,',
+        '$(call BuildFm160Translation,\\\n      '), 1) if opens else mk
+    rep.check('selftest: a call split across lines is caught',
+              bool(opens) and translation_call_is_split(broke) is True,
+              'the predicate cannot see the split it exists to catch')
 
     # -- summary -----------------------------------------------------------
     print('\n%s: %d passed, %d failed, %d skipped, %d warnings'
