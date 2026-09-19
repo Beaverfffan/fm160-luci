@@ -94,6 +94,12 @@ void fm160_config_load(void)
 
 	g_state.enabled = uci_bool("enabled", true);
 
+	/* GNSS is the one subsystem whose switch the MODULE does not store, so
+	 * "have the engine on" has to be re-applied by us at every boot.  Default
+	 * off: turning a radio on is the user's decision, and a tracker that
+	 * starts transmitting a position nobody asked for is not a default. */
+	g_state.gnss.autostart = uci_bool("gnss_autostart", false);
+
 	if (!uci_get("tier_scale", v, sizeof(v))) {
 		n = atoi(v);
 		if (n >= 1 && n <= 6)

@@ -90,6 +90,23 @@ static struct poll_item items[] = {
 	{ "celllock", false, 600000, 15000, 0, 0, 0, 0, fm160_cmd_poll_celllock },
 	/* Carrier aggregation: only meaningful to a human reading the page. */
 	{ "ca",       true,      0, 15000, 0, 0, 0, 0, fm160_cmd_poll_ca       },
+	/* --- M5 -------------------------------------------------------- */
+	/* The engine switch, 22 ms.  Always submitted, including at idle, because
+	 * it is the only read that can notice the engine having been switched on
+	 * from elsewhere or reset to 0 by a module power cycle - and with the
+	 * engine off the NMEA tier below stays silent, so without this tier a
+	 * module that came back would never be noticed at all. */
+	{ "gpspower", false, 600000, 15000, 0, 0, 0, 0, fm160_cmd_poll_gnss_power },
+	/* The NMEA block, 30 ms for eight sentences - cheaper than the cell query
+	 * above it.  Foreground only, matching the design's "only while the GNSS
+	 * page is open": the engine keeps tracking regardless of who is reading,
+	 * so nobody pays for a screen that is not being looked at.
+	 *
+	 * The fire function returns without submitting anything while the engine
+	 * is off, which is the normal state - with the engine off AT+GTGPS?
+	 * answers ERROR, so every such poll would be a wasted transaction on the
+	 * one parser this project is built to be gentle with. */
+	{ "gnss",     true,      0,  5000, 0, 0, 0, 0, fm160_cmd_poll_gnss      },
 	{ NULL, false, 0, 0, 0, 0, 0, 0, NULL },
 };
 

@@ -104,7 +104,7 @@ fm160-luci/
 | **M2** | 拨号：QMI/MBIM 原生 proto 接入 + ECM 自定义 proto + 重连阶梯 + **模式切换白名单/回滚状态机** | 待做 |
 | **M3** | 短信：PDU 编解码（GSM7/UCS2/UDH）、收发、存储、长短信、`sendat` prompt 补丁 | 待做 |
 | **M4** | 锁频 / 锁小区 / 基站：动态能力枚举、一键锁当前小区、邻区表、CA | **已交付并真机验收**（`DEVICE VERIFY OK`）。band lock 写路径**两步走真机验通**（负向探测 + 恒等回写，实测确认 `AT+GTACT=,,,` 的空字段语义是「保留现值」）；cell lock 写路径**未授权写入**（需 UE 复位，且无 SIM 无目标可锁）—— 见 `AT-FACTS.md` §9 |
-| **M5** | GNSS：开关、卫星组合、NMEA 解析、卫星图、可选 TCP 转发 | **真机事实已采齐并实测**：`GTGPSPOWER` 对连接性影响 = 0（USB 契约逐项不变、无重枚举、不写 EFS）、NMEA **从 AT 口出**（本模式无 GNSS 口 ⇒ 无需抢端口）、**本机未接天线 ⇒ 恒 0 颗星、无定位**、`GTGPS?` 30 ms。详见 `AT-FACTS.md` §10。代码/UI 待做 |
+| **M5** | GNSS：开关、卫星组合、NMEA 解析、卫星图、可选 TCP 转发 | **后端 + LuCI 页已写完并通过自测**（224 checks / 0 fail，`_tools/istoreos-h69k/21-gnss-parser-test.sh`），**未联调**。真机事实：`GTGPSPOWER` 对连接性影响 = 0（USB 契约逐项不变、无重枚举、不写 EFS）、NMEA **从 AT 口出**（本模式无 GNSS 口 ⇒ 无需抢端口）、**有天线（四根，与蜂窝 MIMO 共用）但室内恒 0 颗星、无定位、归因未定**、`GTGPS?` 30 ms。实现事实与未实测项见 `AT-FACTS.md` §11，实测事实见 §10 |
 | **M6** | 打磨：i18n、日志导出、CI | 待做 |
 
 ## 4. 未知量处理表（**因为没有真机，这节最重要**）

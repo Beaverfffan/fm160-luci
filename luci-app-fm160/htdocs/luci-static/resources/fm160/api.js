@@ -32,6 +32,23 @@ var callSetCellLock = rpc.declare({ object: 'fm160', method: 'setcelllock',
 					      'scs', 'nrband' ], expect: {} });
 
 /*
+ * M5 write paths, deferred in the same way as M4: the reply arrives only after
+ * the write AND a read-back of the same setting have both completed.
+ *
+ * setgnss is the one write in this whole application with NO capability gate,
+ * and that is not an oversight: AT+GTGPSPOWER is the single GNSS setting the
+ * module does not store, so it cannot survive a power cycle, cannot be left in
+ * an unknown state by a failed write, and both of its values have been observed
+ * on hardware.  Nothing can be made worse by trying it.
+ *
+ * setgnsscfg is the opposite - stored, and gated on AT+GTGPSCFG=?.
+ */
+var callSetGnss    = rpc.declare({ object: 'fm160', method: 'setgnss',
+				   params: [ 'enabled' ], expect: {} });
+var callSetGnssCfg = rpc.declare({ object: 'fm160', method: 'setgnsscfg',
+				   params: [ 'constellation' ], expect: {} });
+
+/*
  * USB profiles.
  *
  * The dial-up document carries FOUR port tables, one per platform, and the same
@@ -604,6 +621,244 @@ function caCellSummary(c) {
 	       ' / ' + caModName(c.dl_mod);
 }
 
+/*
+ * --- M5: GNSS ---------------------------------------------------------
+ *
+ * Three measured facts shape everything below, and none of them is what a
+ * reasonable person would assume:
+ *
+ *   The NMEA block comes out of the AT PORT.  USB mode 17/32 exposes no GNSS
+ *   interface and the module emits no URC for it - AT+GTGPS? returns the
+ *   sentences as its ordinary command response.  So there is nothing to
+ *   connect, no port to lease, and nothing a page can do to make the polling
+ *   cheaper or noisier than the daemon already has it.
+ *
+ *   "Engine on, 0 in view, no fix" is the NORMAL state.  It is what an indoor
+ *   receiver reports, and it must be displayed as a plain fact rather than
+ *   dressed up as a fault.  The measured no-fix frame carries no RMC and no
+ *   GGA at all - only GSA and GSV - so "NMEA is healthy" cannot be defined as
+ *   "an RMC arrived".
+ *
+ *   An empty answer is not a failure either.  Immediately after the engine is
+ *   switched on, AT+GTGPS? answers OK with the header and not one sentence.
+ *   read.empty_frames counts those in a row: one or two is the normal startup,
+ *   a climbing count means the engine claims to be on and never speaks.
+ *
+ * Two more rules, carried over from M4 and unchanged here:
+ *
+ *   The daemon writes every number with blobmsg_add_u32, so the -1000000
+ *   sentinel reaches JavaScript as 4293967296; api.reported() is the filter.
+ *   Zero is NOT a sentinel - "0 satellites in view" is a measurement, while an
+ *   absent elevation is the absence of one.
+ *
+ *   The capability answer is the licence to write.  AT+GTGPSCFG=? has never
+ *   been observed on this hardware, so fm160d parses it without assuming any
+ *   layout and may come back with a set narrower than reality.  A page that
+ *   ignores config_caps.valid offers buttons the daemon will refuse.
+ */
+
+function gnssOf(st)        { return (st && st.gnss) || {}; }
+function gnssEngineOf(st)  { return gnssOf(st).engine  || {}; }
+function gnssReadOf(st)    { return gnssOf(st).read    || {}; }
+function gnssFixOf(st)     { return gnssOf(st).fix     || {}; }
+function gnssCfgOf(st)     { return gnssOf(st).config  || {}; }
+function gnssCfgCapsOf(st) { return gnssOf(st).config_caps || {}; }
+function gnssAgpsOf(st)    { return gnssOf(st).agps    || {}; }
+function gnssConstsOf(st)  { return gnssOf(st).constellations || []; }
+function gnssSatsOf(st)    { return gnssOf(st).satellites || []; }
+
+/* Constellation codes as enum fm160_gnss_kind publishes them. */
+var GNSS_KIND_TEXT = {
+	0: _('other'), 1: 'GPS', 2: _('BeiDou'),
+	3: 'GLONASS', 4: 'Galileo', 5: 'QZSS'
+};
+
+function gnssKindName(kind) { return GNSS_KIND_TEXT[kind] || _('other'); }
+
+/* The talker is what the module actually sent ("GP", "BD", "PQ", "GL", "GA");
+ * the kind is our reading of it.  An unrecognised talker decodes to kind 0,
+ * and there the talker is the fact and every name would be a guess - so both
+ * are shown, and the raw one is not thrown away. */
+function gnssConstName(c) {
+	if (!c)
+		return '-';
+	if (c.kind === 0)
+		return c.talker + ' (' + _('unknown') + ')';
+	return gnssKindName(c.kind);
+}
+
+/*
+ * The one line that answers "is the GNSS working?" without lying either way.
+ *
+ * Ordered by what the user can act on.  No AT link and a switched-off engine
+ * are decisions, an empty answer right after switching on is startup, and zero
+ * satellites indoors is physics.  A fix is only claimed when the daemon has a
+ * position: it sets has_position only from a GGA/RMC whose status is 'A', so a
+ * "void" sentence carrying the receiver's last known position can never light
+ * this up as if it were live.
+ */
+function gnssStateText(st) {
+	var e = gnssEngineOf(st), r = gnssReadOf(st), f = gnssFixOf(st);
+
+	if (!e.known)
+		return _('engine state not read yet');
+	if (!e.on)
+		return _('engine off');
+	if (r.read_error)
+		return _('the module answers ERROR - the engine is not really on');
+	if (f.has_position)
+		return _('fix acquired');
+	if (r.empty_frames > 1)
+		return _('engine on, but no sentence yet') + ' (' + r.empty_frames +
+		       ' ' + _('empty answers in a row') + ')';
+	if (r.empty_frames === 1)
+		return _('engine on, still starting up') + ' (' + _('one empty answer') + ')';
+	if (!reported(f.visible) || f.visible === 0)
+		return _('engine on, 0 satellites in view - normal indoors');
+	return _('engine on') + ', ' + f.visible + ' ' + _('in view, no fix yet');
+}
+
+/* A level the views can colour by.  'off' and 'starting' are not faults. */
+function gnssLevel(st) {
+	var e = gnssEngineOf(st), r = gnssReadOf(st), f = gnssFixOf(st);
+
+	if (!e.known || !e.on || r.read_error)
+		return 'down';
+	if (f.has_position)
+		return 'ok';
+	if (r.empty_frames > 1)
+		return 'warn';
+	return 'off';
+}
+
+/* raw NMEA of the last block that had sentences, for the debug pane. */
+function gnssRaw(st) { return gnssReadOf(st).raw || ''; }
+
+/*
+ * u32 -> the int32 the daemon meant.
+ *
+ * Every signed field makes this round trip, and lat_1e7/lon_1e7 are the two
+ * where it changes the answer rather than the formatting: a southern latitude
+ * or a western longitude arrives as a large positive number, which rendered
+ * naively would put the user somewhere in the Pacific.
+ */
+function toSigned(v) {
+	var n = Number(v) || 0;
+
+	return n > 2147483647 ? n - 4294967296 : n;
+}
+
+/*
+ * Degrees, from the x1e7 integers, or null.
+ *
+ * has_position is the ONLY valid gate here.  The daemon deliberately does not
+ * use a sentinel for these two, because -1000000 is a legal scaled coordinate
+ * (-0.1 deg, in the Gulf of Guinea) - so "0,0" is a real place and a missing
+ * fix has to be recognised some other way.
+ */
+function gnssCoord(st) {
+	var f = gnssFixOf(st);
+
+	if (!f.has_position)
+		return null;
+	return { lat: toSigned(f.lat_1e7) / 1e7, lon: toSigned(f.lon_1e7) / 1e7 };
+}
+
+function fmtCoord(v) {
+	return (v === null || v === undefined) ? '-' : v.toFixed(6);
+}
+
+/* The hemisphere letters are only sent when they were present, so they are
+ * appended rather than assumed. */
+function fmtLat(st) {
+	var c = gnssCoord(st), f = gnssFixOf(st);
+
+	return c ? (fmtCoord(c.lat) + ' ' + (f.lat_ns || '')) : '-';
+}
+
+function fmtLon(st) {
+	var c = gnssCoord(st), f = gnssFixOf(st);
+
+	return c ? (fmtCoord(c.lon) + ' ' + (f.lon_ew || '')) : '-';
+}
+
+/*
+ * AT+GTGPSCFG x=2 - the satellite combination.
+ *
+ * These are the values the FM160 AT manual documents.  1 is NOT among them:
+ * the manual's list skips it, which is why fm160d's builder refuses it, and
+ * offering it here would produce a control that always fails.  14 is this
+ * module's value - all five constellations.
+ */
+var GNSS_CFG_VALUES = {
+	0:  'GPS + GLONASS',
+	2:  'GPS + Galileo',
+	3:  'GPS + QZSS',
+	4:  'GPS + BeiDou + Galileo',
+	5:  'GPS + BeiDou + GLONASS',
+	6:  'GPS + BeiDou + QZSS',
+	7:  'GPS + GLONASS + Galileo',
+	14: _('all five') + ' (GPS + BeiDou + Galileo + GLONASS + QZSS)',
+	15: 'GPS'
+};
+
+function gnssCfgLabel(v) {
+	return GNSS_CFG_VALUES[v] || (_('undocumented combination') + ' ' + v);
+}
+
+/*
+ * What may be WRITTEN, which is much less than what may be read.
+ *
+ * Two gates, narrowest wins:
+ *   - the documented set above, because the manual is the only source for what
+ *     the number means;
+ *   - the modem's own AT+GTGPSCFG=? answer, because fm160d checks exactly that
+ *     before it will send anything.
+ *
+ * An empty list means "do not offer the control", not "offer everything":
+ * either the answer never arrived, or the list it produced contains nothing we
+ * can name.  Guessing a value here would mean writing an unknown satellite
+ * combination into a setting that survives a power cycle.
+ */
+function gnssCfgChoices(st) {
+	var caps = gnssCfgCapsOf(st);
+
+	if (!caps.valid)
+		return [];
+	return (caps.values || []).filter(function(v) {
+		return Object.prototype.hasOwnProperty.call(GNSS_CFG_VALUES, v);
+	}).sort(function(a, b) { return a - b; });
+}
+
+var GNSS_FIX_TYPE_TEXT = {
+	0: _('none'), 1: _('no fix'), 2: '2D', 3: '3D'
+};
+
+function gnssFixTypeName(t) { return GNSS_FIX_TYPE_TEXT[t] || ('type ' + t); }
+
+/* GGA <quality>. */
+var GNSS_QUALITY_TEXT = {
+	0: _('invalid'), 1: 'GPS', 2: 'DGPS', 3: 'PPS',
+	4: _('RTK fixed'), 5: _('RTK float'), 6: _('estimated')
+};
+
+function gnssQualityName(q) { return GNSS_QUALITY_TEXT[q] || ('quality ' + q); }
+
+/* Dilution of precision, stored in tenths.  Absent prints '-' rather than a
+ * number, because a DOP the modem did not report is not a DOP of zero. */
+function gnssDop(v) { return reported(v) ? (v / 10).toFixed(1) : '-'; }
+
+function gnssAltM(st)  { var v = gnssFixOf(st).alt_dm;   return reported(v) ? (v / 10) : null; }
+function gnssSpeedKmh(st) {
+	var v = gnssFixOf(st).speed_cmps;
+
+	return reported(v) ? (v * 0.036) : null;
+}
+
+var GNSS_EPO_TEXT = { 0: _('off'), 1: 'MSB', 2: 'MSA' };
+
+function gnssEpoName(v) { return GNSS_EPO_TEXT[v] || ('EPO ' + v); }
+
 return baseclass.extend({
 	USB_MODES: USB_MODES,
 	USB_PLATFORM: USB_PLATFORM,
@@ -623,6 +878,8 @@ return baseclass.extend({
 	setEnabled: callEnabled,
 	setBands: callSetBands,
 	setCellLock: callSetCellLock,
+	setGnss: callSetGnss,
+	setGnssCfg: callSetGnssCfg,
 
 	ratName: ratName,
 	regName: regName,
@@ -693,6 +950,33 @@ return baseclass.extend({
 	caModName: caModName,
 	caStateName: caStateName,
 	caCellSummary: caCellSummary,
+
+	/* --- M5 -------------------------------------------------------- */
+	gnssOf: gnssOf,
+	gnssEngineOf: gnssEngineOf,
+	gnssReadOf: gnssReadOf,
+	gnssFixOf: gnssFixOf,
+	gnssCfgOf: gnssCfgOf,
+	gnssCfgCapsOf: gnssCfgCapsOf,
+	gnssAgpsOf: gnssAgpsOf,
+	gnssConstsOf: gnssConstsOf,
+	gnssSatsOf: gnssSatsOf,
+	gnssKindName: gnssKindName,
+	gnssConstName: gnssConstName,
+	gnssStateText: gnssStateText,
+	gnssLevel: gnssLevel,
+	gnssRaw: gnssRaw,
+	gnssCoord: gnssCoord,
+	gnssLat: fmtLat,
+	gnssLon: fmtLon,
+	gnssCfgLabel: gnssCfgLabel,
+	gnssCfgChoices: gnssCfgChoices,
+	gnssFixTypeName: gnssFixTypeName,
+	gnssQualityName: gnssQualityName,
+	gnssDop: gnssDop,
+	gnssAltM: gnssAltM,
+	gnssSpeedKmh: gnssSpeedKmh,
+	gnssEpoName: gnssEpoName,
 
 	/*
 	 * Modes that may be offered for a given dial kind.

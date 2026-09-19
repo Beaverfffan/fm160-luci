@@ -15,3 +15,13 @@ config fm160 'main'
 
 	# syslog level: 3=err 4=warn 6=info 7=debug
 	option log_level '6'
+
+	# Switch the GNSS engine on at boot, and again whenever the module comes
+	# back after disappearing.  Off by default: powering up a radio is the
+	# user's decision, and the engine costs current even with no fix.
+	#
+	# It has to be re-applied every time because AT+GTGPSPOWER is the one GNSS
+	# setting the module does NOT store - it comes back off after a power
+	# cycle.  This option is what makes it stick; leaving it at 0 does NOT
+	# mean "off", it means "whatever the module happens to be doing".
+	option gnss_autostart '0'

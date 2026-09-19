@@ -522,6 +522,12 @@ enum ident_kind {
 	IDENT_USBMODE,        /* +GTUSBMODE: <n>                             */
 	IDENT_GTACT_CAPS,     /* +GTACT: (…),(…) x9                          */
 	IDENT_CELLLOCK_CAPS,  /* +GTCELLLOCK: ranges x7                      */
+	/* M5 */
+	IDENT_GNSS_POWER,     /* +GTGPSPOWER: <n>                            */
+	IDENT_GNSS_CFG,       /* +GTGPSCFG: then "<x>,<value>" lines          */
+	IDENT_GNSS_CFG_CAPS,  /* +GTGPSCFG=? - the licence to write it        */
+	IDENT_GNSS_EPO,       /* +GTGPSEPO: <n>                              */
+	IDENT_GNSS_SUPL,      /* +GTAGPSSERV: "<host>",<port>                */
 };
 
 struct ident_item {
@@ -536,11 +542,11 @@ struct ident_item {
  * change while the daemon runs (identity, capability lists) or are handled by
  * a dedicated tier (see sched.c).
  *
- * The two "=?" capability reads belong here rather than in a poll tier for a
- * sharper reason than cost: they are the *permission* for the M4 write path.
- * fm160_cmd_set_bands()/fm160_cmd_set_celllock() refuse to send anything until
- * the corresponding enumeration has succeeded, so a module that will not tell
- * us what it supports never gets written to.
+ * The "=?" capability reads belong here rather than in a poll tier for a
+ * sharper reason than cost: they are the *permission* for the write paths.
+ * fm160_cmd_set_bands()/fm160_cmd_set_celllock()/fm160_cmd_set_gnss_cfg()
+ * refuse to send anything until the corresponding enumeration has succeeded, so
+ * a module that will not tell us what it supports never gets written to.
  */
 static struct ident_item ident_plan[] = {
 	{ "AT+CGMI",       g_state.manufacturer, sizeof(g_state.manufacturer), IDENT_STR },
@@ -566,6 +572,25 @@ static struct ident_item ident_plan[] = {
 	/* M4.  Both answer in 21 ms / 16 ms on the live module. */
 	{ "AT+GTACT=?",    NULL,                 0,                            IDENT_GTACT_CAPS },
 	{ "AT+GTCELLLOCK=?", NULL,               0,                            IDENT_CELLLOCK_CAPS },
+	/*
+	 * M5.  Five reads, 104 ms in total measured, in this order because the
+	 * first two are what fm160_cmd_gnss_autostart() needs at the end of the
+	 * chain: the engine state to compare against, and the capability list
+	 * that licenses the constellation write.  AT+GTGPSCFG=? in particular
+	 * belongs here rather than in a poll tier for the same reason the M4
+	 * capability reads do: it is a PERMISSION, and a permission that a poll
+	 * loop could lose is not a permission.
+	 *
+	 * ⚠️ AT+GTGPSCFG=? is the one entry here whose answer has never been
+	 * seen on hardware.  It is asked for precisely so that the write path
+	 * can refuse when the answer is unusable - see
+	 * fm160_parse_gnss_cfg_caps().
+	 */
+	{ "AT+GTGPSPOWER?", NULL,                0,                            IDENT_GNSS_POWER },
+	{ "AT+GTGPSCFG=?", NULL,                 0,                            IDENT_GNSS_CFG_CAPS },
+	{ "AT+GTGPSCFG?",  NULL,                 0,                            IDENT_GNSS_CFG },
+	{ "AT+GTGPSEPO?",  NULL,                 0,                            IDENT_GNSS_EPO },
+	{ "AT+GTAGPSSERV?", NULL,                0,                            IDENT_GNSS_SUPL },
 };
 
 static const char *first_value_line(const char *resp)
@@ -637,11 +662,18 @@ static void ident_next(void)
 		fm160_log(LOG_INFO, "identity: %s %s fw=%s imei=%s mode=%d",
 			  g_state.manufacturer, g_state.model, g_state.revision,
 			  g_state.imei, g_state.usb_mode);
-		fm160_log(LOG_INFO, "boot read-outs: gtact caps=%s celllock caps=%s",
+		fm160_log(LOG_INFO,
+			  "boot read-outs: gtact caps=%s celllock caps=%s gnss cfg caps=%s",
 			  g_state.gtact_caps.valid ? "ok" : "unavailable",
-			  g_state.celllock_caps.valid ? "ok" : "unavailable");
+			  g_state.celllock_caps.valid ? "ok" : "unavailable",
+			  g_state.gnss.cfg.caps_valid ? "ok" : "unavailable");
 		fm160_state_mark_dirty();
 		fm160_state_publish();
+		/* The engine state and the write licence have both just been read,
+		 * which is the only moment uci's gnss_autostart wish can be acted on
+		 * without either guessing or fighting the user - see the notes on
+		 * fm160_cmd_gnss_autostart(). */
+		fm160_cmd_gnss_autostart();
 		return;
 	}
 
@@ -664,6 +696,21 @@ static void ident_store(struct at_req *req, enum at_status status,
 			break;
 		case IDENT_CELLLOCK_CAPS:
 			fm160_parse_celllock_caps(response);
+			break;
+		case IDENT_GNSS_POWER:
+			fm160_parse_gnss_power(response);
+			break;
+		case IDENT_GNSS_CFG:
+			fm160_parse_gnss_cfg(response);
+			break;
+		case IDENT_GNSS_CFG_CAPS:
+			fm160_parse_gnss_cfg_caps(response);
+			break;
+		case IDENT_GNSS_EPO:
+			fm160_parse_gnss_epo(response);
+			break;
+		case IDENT_GNSS_SUPL:
+			fm160_parse_gnss_supl(response);
 			break;
 		case IDENT_STR:
 		default:
@@ -700,11 +747,19 @@ void fm160_ident_reset(void)
 	g_state.ident_done = false;
 
 	/* Capabilities are invalidated with the identity they belong to.  If the
-	 * re-read fails the M4 write path is blocked, which is the safe
+	 * re-read fails the write paths are blocked, which is the safe
 	 * direction: writing a persistent setting to a module that just failed
 	 * to describe itself is worse than a temporarily greyed-out button. */
 	g_state.gtact_caps.valid = false;
 	g_state.celllock_caps.valid = false;
+	g_state.gnss.cfg.caps_valid = false;
+
+	/* The autostart wish gets one attempt per ident run.  Resetting it here
+	 * rather than never means a module that was power-cycled - the one case
+	 * where the engine really does come back switched off - gets its engine
+	 * switched on again, while a user who turned the engine off by hand is
+	 * not fought by a poll that keeps seeing "off". */
+	g_state.gnss.autostart_done = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1475,69 +1530,86 @@ int fm160_celllock_command(char *out, size_t outlen, int mode, int rat, int type
 	return 0;
 }
 
-struct m4_write_ctx {
+/* ================================================================== */
+/* the shared write-then-read-back sequence                             */
+/* ================================================================== */
+
+/*
+ * Every setting fm160d can write is stored in the module, and none of them
+ * reports the outcome in its own answer: AT+GTACT=,,,103 answers OK whether or
+ * not the modem clamped or ignored the value.  The only trustworthy
+ * confirmation is reading the setting back and re-parsing it - which is also
+ * what makes "the write landed" a statement about the modem rather than about
+ * this queue.
+ *
+ * So the sequence is always: write -> read the setting back -> parse the
+ * read-back -> answer the caller with the READ-BACK's status, not the write's.
+ *
+ * One flag serialises the whole class.  The manual forbids combining
+ * GTACT / GTRAT / COPS / GTCELLLOCK with each other, and although the GNSS
+ * writes are not named there they are configuration writes to the same flash:
+ * queueing two of these back to back is never worth the risk, so the gate is
+ * global to all four setters.
+ *
+ * This machinery used to live inside the two M4 setters only, with the
+ * read-back's parser chosen by strstr() on the command string.  With four
+ * setters the parser became a field (apply) instead of an inference, and the
+ * GNSS writes added "after": a follow-up that runs once the sequence is done,
+ * so the caller does not have to know the sequence exists.
+ */
+struct cfg_write {
 	at_done_cb user_cb;
 	void *user_arg;
-	int quiet_kind;
+	int  quiet_kind;
+	void (*apply)(const char *resp);   /* parse the read-back; may be NULL */
+	void (*after)(void);               /* optional follow-up; may be NULL  */
 	char readback[FM160_AT_CMD_MAX];
 };
 
-/*
- * Serialisation + debounce for the two persistent writers.
- *
- * AT+GTACT and AT+GTCELLLOCK both touch an EFS file, and the manual forbids
- * combining them with each other and with GTRAT/COPS.  atq_submit() already
- * serialises individual commands, but it would happily queue a GTACT= right
- * behind a GTCELLLOCK= - which is exactly the combination the manual rules
- * out.  A single in-flight flag, cleared only when the last read-back of the
- * sequence has finished, is enough to keep that from happening.  The quiet
- * window afterwards keeps the poll tiers off the module while it re-registers
- * (a band change drops the current cell).
- */
-static bool m4_writing;
+static bool cfg_writing;
 
-static void m4_readback_cb(struct at_req *req, enum at_status status,
-			   const char *response, void *arg)
+static void cfg_readback_cb(struct at_req *req, enum at_status status,
+			    const char *response, void *arg)
 {
-	struct m4_write_ctx *c = arg;
+	struct cfg_write *c = arg;
 
-	/* The read-back, not the write, is what gets reported as the new state:
-	 * the module may clamp, reject or reinterpret a value, and only the
-	 * read-back shows which of those happened. */
-	if (status == AT_STATUS_OK) {
-		if (strstr(c->readback, "GTCELLLOCK"))
-			fm160_parse_celllock(response);
-		else
-			fm160_parse_gtact(response);
-	}
+	/* The read-back, not the write, carries the new state: the module may
+	 * clamp, reject or reinterpret a value, and only the read-back shows
+	 * which of those happened. */
+	if (status == AT_STATUS_OK && c->apply)
+		c->apply(response);
+
 	if (c->user_cb) {
+		/* The caller is answered with the READ-BACK command, because that
+		 * is the exchange the response actually belongs to. */
 		struct at_req fake = { 0 };
 
 		snprintf(fake.cmd, sizeof(fake.cmd), "%s", c->readback);
 		c->user_cb(&fake, status, response, c->user_arg);
 	}
 
-	/* The band list may have changed, so the derived CA view is stale. */
-	fm160_cmd_poll_ca();
+	if (c->after)
+		c->after();
 	fm160_state_mark_dirty();
-	m4_writing = false;
+	cfg_writing = false;
 	free(c);
 }
 
-static void m4_write_cb(struct at_req *req, enum at_status status,
-			const char *response, void *arg)
+static void cfg_write_cb(struct at_req *req, enum at_status status,
+			 const char *response, void *arg)
 {
-	struct m4_write_ctx *c = arg;
+	struct cfg_write *c = arg;
 	int ret;
 
 	if (status != AT_STATUS_OK) {
 		if (c->user_cb)
 			c->user_cb(req, status, response, c->user_arg);
-		/* The write never landed, so nothing is re-registering: drop the
-		 * window we opened instead of keeping the polls away for 8 s. */
+		/* The write never landed, so whatever the quiet window was opened
+		 * for is not happening: drop it rather than keeping the polls away
+		 * for the rest of its duration. */
 		if (g_state.quiet_kind == c->quiet_kind)
 			atq_clear_quiet();
-		m4_writing = false;
+		cfg_writing = false;
 		free(c);
 		return;
 	}
@@ -1546,99 +1618,1276 @@ static void m4_write_cb(struct at_req *req, enum at_status status,
 	 * port, quiet window, full) the caller still has to be answered, and the
 	 * context still has to be freed - otherwise the ubus request stays
 	 * deferred forever and the caller hangs. */
-	ret = atq_submit(AT_PRIO_STATE, c->readback, NULL, 5000, m4_readback_cb, c);
+	ret = atq_submit(AT_PRIO_STATE, c->readback, NULL, 5000, cfg_readback_cb, c);
 	if (ret) {
 		fm160_log(LOG_WARNING, "read-back %s rejected (rc=%d)",
 			  c->readback, ret);
 		if (c->user_cb)
 			c->user_cb(req, AT_STATUS_BUSY, response, c->user_arg);
-		m4_writing = false;
+		cfg_writing = false;
 		free(c);
 	}
 }
 
+/*
+ * Send one configuration write and then its read-back.
+ *
+ * readback is a WHOLE command line ("AT+GTACT?"), not a suffix, because a
+ * write whose read-back is not the same setting cannot be confirmed - so the
+ * pair is supplied together and neither is derived from the other.
+ *
+ * Nothing is logged here: the caller keeps its own log line so that each write
+ * has its own name, which is also how the device verification script counts
+ * them.
+ */
+static int cfg_write(const char *cmd, const char *readback, int timeout_ms,
+		     int quiet_kind, const char *quiet_reason, int quiet_s,
+		     void (*apply)(const char *), void (*after)(void),
+		     at_done_cb cb, void *arg)
+{
+	struct cfg_write *c;
+	int ret;
+
+	if (cfg_writing)
+		return -1;
+
+	c = calloc(1, sizeof(*c));
+	if (!c)
+		return -1;
+	c->user_cb = cb;
+	c->user_arg = arg;
+	c->quiet_kind = quiet_kind;
+	c->apply = apply;
+	c->after = after;
+	snprintf(c->readback, sizeof(c->readback), "%s", readback);
+
+	/* The flag goes up BEFORE the submit: atq_dispatch() answers NOPORT and
+	 * "could not send" synchronously, so the callback may already have run
+	 * (and cleared the flag) by the time atq_submit() returns.  Setting it
+	 * afterwards would leave the flag stuck true and lock the write path
+	 * out for the rest of the process's life. */
+	cfg_writing = true;
+	ret = atq_submit(AT_PRIO_INTERACTIVE, cmd, NULL, timeout_ms, cfg_write_cb, c);
+	if (ret) {
+		cfg_writing = false;
+		free(c);
+		return ret;
+	}
+	/* Only when the sequence is really in flight, and only when the caller
+	 * asked for a window: a rejected write must not leave one behind with
+	 * nothing to justify it, and a write with nothing to wait for (the GNSS
+	 * engine switch) must not open one either - a QUIET_NONE/0 pair is how
+	 * that is expressed. */
+	if (cfg_writing && quiet_s > 0)
+		atq_set_quiet(quiet_kind, quiet_reason, quiet_s);
+	return 0;
+}
+
 int fm160_cmd_set_bands(const char *bands_csv, at_done_cb cb, void *arg)
 {
-	struct m4_write_ctx *c;
 	char cmd[FM160_AT_CMD_MAX];
-	int ret;
 
 	if (!g_state.gtact_caps.valid) {
 		fm160_log(LOG_WARNING,
 			  "refusing to write bands: AT+GTACT=? never enumerated");
 		return -1;
 	}
-	if (m4_writing)
-		return -1;
 	if (fm160_bands_command(cmd, sizeof(cmd), bands_csv))
 		return -1;
 
-	c = calloc(1, sizeof(*c));
-	if (!c)
-		return -1;
-	c->user_cb = cb;
-	c->user_arg = arg;
-	c->quiet_kind = QUIET_BANDS;
-	snprintf(c->readback, sizeof(c->readback), "AT+GTACT?");
-
 	fm160_log(LOG_WARNING, "band lock write: %s", cmd);
-	/* The flag goes up BEFORE the submit: atq_dispatch() answers NOPORT and
-	 * "could not send" synchronously, so the callback may already have run
-	 * (and cleared the flag) by the time atq_submit() returns.  Setting it
-	 * afterwards would leave the flag stuck true and lock the write path
-	 * out for the rest of the process's life. */
-	m4_writing = true;
-	ret = atq_submit(AT_PRIO_INTERACTIVE, cmd, NULL, 8000, m4_write_cb, c);
-	if (ret) {
-		m4_writing = false;
-		free(c);
+	/* A band change drops the current cell, so the quiet window keeps the
+	 * polls off the module while it re-registers, and the derived CA view is
+	 * refreshed once the read-back has been parsed. */
+	if (cfg_write(cmd, "AT+GTACT?", 8000, QUIET_BANDS,
+		      "band lock write, re-registering", 8,
+		      fm160_parse_gtact, fm160_cmd_poll_ca, cb, arg))
 		return -1;
-	}
-	/* Only when the sequence is really in flight: a rejected write must not
-	 * leave a quiet window behind with nothing to justify it. */
-	if (m4_writing)
-		atq_set_quiet(QUIET_BANDS, "band lock write, re-registering", 8);
 	return 0;
 }
 
 int fm160_cmd_set_celllock(int mode, int rat, int type, unsigned long long earfcn,
 			   int pci, int scs, int nrband, at_done_cb cb, void *arg)
 {
-	struct m4_write_ctx *c;
 	char cmd[FM160_AT_CMD_MAX];
-	int ret;
 
 	if (!g_state.celllock_caps.valid) {
 		fm160_log(LOG_WARNING,
 			  "refusing to write cell lock: AT+GTCELLLOCK=? never enumerated");
 		return -1;
 	}
-	if (m4_writing)
-		return -1;
 	if (fm160_celllock_command(cmd, sizeof(cmd), mode, rat, type, earfcn,
 				   pci, scs, nrband))
 		return -1;
 
-	c = calloc(1, sizeof(*c));
-	if (!c)
-		return -1;
-	c->user_cb = cb;
-	c->user_arg = arg;
-	c->quiet_kind = QUIET_CELLLOCK;
-	snprintf(c->readback, sizeof(c->readback), "AT+GTCELLLOCK?");
-
 	fm160_log(LOG_WARNING, "cell lock write: %s", cmd);
-	m4_writing = true;
-	ret = atq_submit(AT_PRIO_INTERACTIVE, cmd, NULL, 10000, m4_write_cb, c);
-	if (ret) {
-		m4_writing = false;
-		free(c);
-		return -1;
-	}
 	/* The write only takes effect after a UE reset, which fm160d never
 	 * performs; the quiet window only covers the EFS commit. */
-	if (m4_writing)
-		atq_set_quiet(QUIET_CELLLOCK, "cell lock write to EFS", 8);
+	if (cfg_write(cmd, "AT+GTCELLLOCK?", 10000, QUIET_CELLLOCK,
+		      "cell lock write to EFS", 8, fm160_parse_celllock, NULL,
+		      cb, arg))
+		return -1;
 	return 0;
 }
 
+/* ================================================================== */
+/* M5: GNSS                                                             */
+/* ================================================================== */
+
+/*
+ * The GNSS command set is not in the AT manual at all - it comes from the
+ * vendor's separate Application Guide_GNSS_V1.0 - and where that guide and the
+ * hardware disagree, the hardware is what this file follows.  The four measured
+ * facts that shape everything below (docs/AT-FACTS.md section 10):
+ *
+ *   1. NMEA arrives as the RESPONSE to AT+GTGPS? on the AT port.  There is no
+ *      GNSS interface in this USB mode, so nothing new is opened, leased or
+ *      listened on: the whole milestone rides the ttyUSB2 channel that has been
+ *      running since M1.
+ *   2. The <item> argument MUST be quoted.  AT+GTGPS=RMC answers ERROR;
+ *      AT+GTGPS="RMC" answers OK.  Both failures look identical to "the engine
+ *      is off", so a wrong quote is expensive to diagnose - hence the builder
+ *      below.
+ *   3. With the engine off, AT+GTGPS? answers ERROR as well.  The read is
+ *      therefore never attempted unless the power state says the engine is on.
+ *   4. The sentences do NOT follow the header on the same line.  The response is
+ *      a bare "+GTGPS: " line and then the sentences, so a parser keyed on the
+ *      header would find nothing at all.
+ */
+
+/* ------------------------------------------------------------------ */
+/* M5 command builders                                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * AT+GTGPS[=<item>] - read the NMEA buffer, or one item of it.
+ *
+ * The quotes are syntax, not decoration (see fact 2 above).  The item is
+ * restricted to exactly three uppercase letters rather than escaped: that is
+ * the whole alphabet the modem advertises ("RMC","GGA","GSA","GSV"), and
+ * refusing anything else is the only way a space, comma or quote can never
+ * reach the command line.
+ *
+ * item == NULL or "" means "every sentence", which is the form the poll uses:
+ * one transaction returns the whole block, so asking for the four items
+ * separately would quadruple the cost for the same data.
+ */
+int fm160_gnss_item_command(char *out, size_t outlen, const char *item)
+{
+	int n, i;
+
+	if (!item || !item[0]) {
+		n = snprintf(out, outlen, "AT+GTGPS?");
+		return (n < 0 || (size_t)n >= outlen) ? -1 : 0;
+	}
+	for (i = 0; i < 3; i++)
+		if (item[i] < 'A' || item[i] > 'Z')
+			return -1;
+	if (item[3])
+		return -1;
+
+	n = snprintf(out, outlen, "AT+GTGPS=\"%s\"", item);
+	return (n < 0 || (size_t)n >= outlen) ? -1 : 0;
+}
+
+/* AT+GTGPSPOWER=<x> - 0 off, 1 on.  Not stored by the module. */
+int fm160_gnss_power_command(char *out, size_t outlen, int on)
+{
+	int n;
+
+	if (on != 0 && on != 1)
+		return -1;
+	n = snprintf(out, outlen, "AT+GTGPSPOWER=%d", on);
+	return (n < 0 || (size_t)n >= outlen) ? -1 : 0;
+}
+
+/*
+ * The satellite combinations the GNSS guide defines for AT+GTGPSCFG=2.
+ *
+ * This is the only value list in this file taken from documentation instead of
+ * from the module, and it is deliberate: the field is a protocol enumeration of
+ * the command itself, not a "device dependent" capability like the USB modes or
+ * the band lists.  It is used as an UPPER bound only - the write path
+ * additionally requires the value to appear in the module's own
+ * AT+GTGPSCFG=? answer, so a firmware with a wider list still cannot be sent a
+ * value this table does not understand.
+ */
+static const int gnss_constellations[] = {
+	0,  /* GPS + GLONASS                                              */
+	2,  /* GPS + Galileo                                              */
+	3,  /* GPS + QZSS                                                 */
+	4,  /* GPS + BeiDou + Galileo                                     */
+	5,  /* GPS + BeiDou + GLONASS                                     */
+	6,  /* GPS + BeiDou + QZSS                                        */
+	7,  /* GPS + GLONASS + Galileo                                    */
+	14, /* GPS + BeiDou + Galileo + GLONASS + QZSS (this module's value) */
+	15, /* GPS only                                                   */
+};
+
+static bool gnss_constellation_documented(int v)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(gnss_constellations); i++)
+		if (gnss_constellations[i] == v)
+			return true;
+	return false;
+}
+
+/*
+ * AT+GTGPSCFG=2,<value> - the satellite combination.
+ *
+ * x is fixed to 2 in the builder.  x=0 (SUPL version) and x=3 (SUPL
+ * certificate) belong to AGPS, which cannot do anything without a data
+ * connection and was never verified on hardware; x=1 (xtra) is not even
+ * reported by this firmware.  Taking x from the caller would offer three
+ * unverified persistent writes for the price of one.
+ */
+int fm160_gnss_cfg_command(char *out, size_t outlen, int value)
+{
+	int n;
+
+	if (!gnss_constellation_documented(value))
+		return -1;
+	n = snprintf(out, outlen, "AT+GTGPSCFG=2,%d", value);
+	return (n < 0 || (size_t)n >= outlen) ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* M5 parsers: the NMEA block                                           */
+/* ------------------------------------------------------------------ */
+
+#define NMEA_FIELD_MAX 32   /* a GSV is 4 header fields + 4 quad groups */
+
+/*
+ * One field of a sentence.  An EMPTY field means "the modem has no value here",
+ * which is a different state from 0: elevation 0 degrees is a real elevation, so
+ * it too would be ambiguous, and NMEA happens to use the empty field for
+ * "unknown" throughout.
+ */
+static int nmea_int(const char *f)
+{
+	if (!f || !f[0])
+		return FM160_NONE;
+	return atoi(f);
+}
+
+/*
+ * A field NMEA prints with one decimal, in tenths: "1.2" -> 12.
+ *
+ * Parsed from the string rather than through a double so that no rounding rule
+ * has to be agreed with the modem, and only ONE fractional digit is taken - a
+ * "1.25" (which no NMEA field produces, but a firmware might) then reads as 12
+ * instead of drifting to 13.
+ */
+static int nmea_x10(const char *f)
+{
+	char buf[24];
+	const char *dot;
+	size_t len, i;
+	int whole, frac = 0, neg = 0;
+	bool digits = false;
+
+	if (!f || !f[0])
+		return FM160_NONE;
+	len = strlen(f);
+	if (len >= sizeof(buf))
+		return FM160_NONE;
+	memcpy(buf, f, len + 1);
+
+	if (buf[0] == '-') {
+		neg = 1;
+		memmove(buf, buf + 1, strlen(buf + 1) + 1);
+	}
+	dot = strchr(buf, '.');
+	if (dot) {
+		if (dot[1] >= '0' && dot[1] <= '9')
+			frac = dot[1] - '0';
+		*(char *)dot = '\0';
+	}
+	for (i = 0; buf[i]; i++) {
+		if (buf[i] < '0' || buf[i] > '9')
+			return FM160_NONE;
+		digits = true;
+	}
+	if (!digits)
+		return FM160_NONE;
+	whole = atoi(buf);
+	return (neg ? -1 : 1) * (whole * 10 + frac);
+}
+
+/*
+ * NMEA latitude/longitude - ddmm.mmmm and dddmm.mmmm - as degrees x 1e7.
+ *
+ * Computed as a double and rounded to an integer: a tenth of a centimetre is far
+ * below anything a receiver reports, so no precision is lost, and the integer
+ * keeps the rest of the daemon float-free.  Latitude fits an int32 at 90 degrees
+ * x 1e7 with room to spare.
+ *
+ * A coordinate of exactly 0 is treated as absent.  The one false negative is a
+ * position exactly on the equator or the prime meridian, and it is worth it: 0,0
+ * is also what a receiver without a fix reports, and "0.000000, 0.000000" on a
+ * map is a confidently wrong answer.
+ */
+static int nmea_degrees_1e7(const char *f)
+{
+	double v, deg;
+	int d;
+
+	if (!f || !f[0])
+		return FM160_NONE;
+	v = strtod(f, NULL);
+	if (v <= 0)
+		return FM160_NONE;
+	d = (int)(v / 100.0);
+	deg = (double)d + (v - (double)d * 100.0) / 60.0;
+	return (int)(deg * 10000000.0 + 0.5);
+}
+
+/*
+ * The NMEA checksum is the XOR of every character between '$' and '*'.
+ *
+ * It is computed for real rather than skipped, and that is the whole reason this
+ * function exists: the sentence the modem emits with nothing in view is
+ *
+ *     $GPGSV,1,1,0,1*54
+ *
+ * which is NOT the shape the standard describes - it carries one field more than
+ * it should.  Shape therefore cannot be used to tell a real sentence from a
+ * mangled one; only the checksum can.
+ */
+static bool nmea_checksum_ok(const char *body, size_t len, unsigned want)
+{
+	unsigned c = 0;
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		c ^= (unsigned char)body[i];
+	return c == (want & 0xff);
+}
+
+/* Split a comma-separated body in place.  A trailing comma yields a trailing
+ * empty field, which is what the callers expect: an empty field is data. */
+static int nmea_split(char *body, char *f[], int max)
+{
+	int n = 0;
+	char *p = body;
+
+	if (!*p || max < 1)
+		return 0;
+	f[n++] = p;
+	for (; *p && n < max; p++) {
+		if (*p == ',') {
+			*p = '\0';
+			f[n++] = p + 1;
+		}
+	}
+	return n;
+}
+
+/*
+ * Slot for one talker prefix, created on first sight.
+ *
+ * Keyed on the raw two characters, so a constellation this build has never seen
+ * still gets its own row with its prefix recorded - the same rule the band
+ * parser follows with tokens it cannot decode.  "GB" is mapped to BeiDou
+ * alongside "BD" because that is the older prefix for the same system; the slot
+ * stays keyed on the raw prefix either way, so a module that used both would show
+ * two rows rather than losing one.
+ */
+static int gnss_slot(struct fm160_gnss_reading *r, const char *talker)
+{
+	int i, n;
+
+	for (i = 0; i < r->cons_n; i++)
+		if (!strncmp(r->cons[i].talker, talker, 2))
+			return i;
+	if (r->cons_n >= FM160_GNSS_CONST_MAX)
+		return -1;
+
+	n = r->cons_n++;
+	memset(&r->cons[n], 0, sizeof(r->cons[n]));
+	snprintf(r->cons[n].talker, sizeof(r->cons[n].talker), "%s", talker);
+	r->cons[n].visible = FM160_NONE;
+	r->cons[n].snr_best_db = FM160_NONE;
+	if (!strcmp(talker, "GP"))
+		r->cons[n].kind = GNSS_KIND_GPS;
+	else if (!strcmp(talker, "BD") || !strcmp(talker, "GB"))
+		r->cons[n].kind = GNSS_KIND_BDS;
+	else if (!strcmp(talker, "GL"))
+		r->cons[n].kind = GNSS_KIND_GLO;
+	else if (!strcmp(talker, "GA"))
+		r->cons[n].kind = GNSS_KIND_GAL;
+	else if (!strcmp(talker, "PQ"))
+		r->cons[n].kind = GNSS_KIND_QZSS;
+	else
+		r->cons[n].kind = GNSS_KIND_OTHER;
+	return n;
+}
+
+/*
+ * $--GSV,<messages>,<number>,<in view>[,<prn>,<elev>,<azim>,<snr>]...[,<extra>]
+ *
+ * Groups of four are emitted while four whole fields remain.  That tolerance is
+ * not defensive padding, it is required: the measured zero-satellite sentence has
+ * ONE field after <in view> where the standard has none.  It matches the NMEA
+ * 4.10+ signalId convention (GPS L1 -> 1, Galileo E1 -> 7, and the measured
+ * $GAGSV,1,1,0,7*43 agrees), so it is recorded as evidence and otherwise left
+ * alone - a parser that demanded the standard shape would reject a perfectly
+ * normal "nothing in view" answer.
+ */
+static void gnss_gsv(struct fm160_gnss_reading *r, const char *talker,
+		     int nf, char *f[])
+{
+	int slot = gnss_slot(r, talker), quads, i, visible;
+	struct fm160_gnss_const *c;
+
+	if (slot < 0) {
+		r->ignored++;
+		return;
+	}
+	c = &r->cons[slot];
+
+	/* <in view> is repeated in every message of a multi-message GSV.  The
+	 * larger value wins, so a receiver that only fills it in on its first
+	 * message is not read as "nothing visible" on the second. */
+	visible = nf > 3 ? nmea_int(f[3]) : FM160_NONE;
+	if (visible != FM160_NONE && (c->visible == FM160_NONE || visible > c->visible))
+		c->visible = visible;
+
+	quads = (nf - 4) / 4;
+	for (i = 0; i < quads; i++) {
+		char **q = &f[4 + i * 4];
+		struct fm160_gnss_sat *s;
+
+		if (r->sats_n >= FM160_GNSS_SAT_MAX)
+			break;
+		s = &r->sats[r->sats_n++];
+		memset(s, 0, sizeof(*s));
+		s->const_idx = slot;
+		s->prn      = nmea_int(q[0]);
+		s->elev_deg = nmea_int(q[1]);
+		s->azim_deg = nmea_int(q[2]);
+		s->snr_db   = nmea_int(q[3]);
+		c->parsed++;
+		if (s->snr_db != FM160_NONE &&
+		    (c->snr_best_db == FM160_NONE || s->snr_db > c->snr_best_db))
+			c->snr_best_db = s->snr_db;
+	}
+
+	if ((nf - 4) % 4) {
+		r->gsv_trailing = true;
+		r->gsv_trailing_value = nmea_int(f[4 + quads * 4]);
+	}
+}
+
+/*
+ * $--GSA,<mode>,<fix type>,<prn x12>,<pdop>,<hdop>,<vdop>
+ *
+ * The three dilution fields are addressed from the END of the sentence, whatever
+ * the number of PRN slots in front of them.  Reading them at a fixed offset would
+ * turn a sentence with fewer slots into a satellite list with three DOPs in it,
+ * and a DOP of "1.2" would be reported as PRN 1.
+ *
+ * <fix type>: 1 no fix, 2 2D, 3 3D.  Measured no-fix frames carry
+ * "A,1,,...,,," i.e. mode A, type 1 and every field empty.
+ */
+static void gnss_gsa(struct fm160_gnss_reading *r, const char *talker,
+		     int nf, char *f[])
+{
+	int slot = gnss_slot(r, talker), dop_base, i;
+
+	if (slot < 0) {
+		r->ignored++;
+		return;
+	}
+	if (nf < 5) {
+		r->bad_shape++;
+		return;
+	}
+
+	/* Kept as the raw letter ('A' = automatic, 'M' = manual) so nothing has
+	 * to be decided about it here. */
+	r->fix_mode = (int)(unsigned char)f[1][0];
+	r->fix_type = nmea_int(f[2]);
+	if (r->fix_type == FM160_NONE)
+		r->fix_type = 0;
+
+	dop_base = nf - 3;
+	if (dop_base > 3) {
+		for (i = 3; i < dop_base; i++) {
+			int prn = nmea_int(f[i]);
+
+			if (prn == FM160_NONE)
+				continue;
+			r->sats_used++;
+			if (r->cons[slot].used_n < FM160_GNSS_USED_MAX)
+				r->cons[slot].used_prn[r->cons[slot].used_n++] = prn;
+		}
+	}
+
+	/*
+	 * The three dilutions are taken as ONE unit from the first sentence that
+	 * carries a complete triple, and nothing later may change them:
+	 *   - a multi-constellation receiver emits one GSA per constellation
+	 *     (measured: GPS, BeiDou, Galileo, QZSS all present), and the order is
+	 *     fixed by the modem, GPS first.  Letting each one overwrite would make
+	 *     the published PDOP/HDOP/VDOP depend on which constellation happens
+	 *     to be emitted last.
+	 *   - a sparse later sentence - one that lists no DOP at all, which is the
+	 *     measured no-fix shape - would otherwise ERASE a good triple and
+	 *     replace it with three sentinels.
+	 * So: the first complete triple wins, and an incomplete one is never
+	 * published.  Requiring all three together also keeps the unit intact -
+	 * mixing one constellation's PDOP with another's VDOP would describe a
+	 * solution that does not exist.
+	 */
+	{
+		int p = nmea_x10(f[dop_base]);
+		int h = nmea_x10(f[dop_base + 1]);
+		int v = nmea_x10(f[dop_base + 2]);
+
+		if (r->pdop_x10 == FM160_NONE &&
+		    p != FM160_NONE && h != FM160_NONE && v != FM160_NONE) {
+			r->pdop_x10 = p;
+			r->hdop_x10 = h;
+			r->vdop_x10 = v;
+		}
+	}
+	r->cons[slot].in_fix = r->cons[slot].used_n;
+}
+
+/*
+ * $--GGA,<utc>,<lat>,<N/S>,<lon>,<E/W>,<quality>,<in use>,<hdop>,<alt>,M,...
+ *
+ * Present only once there is a fix - the measured no-fix block contains no GGA
+ * line at all - so nothing in here may be treated as required.
+ *
+ * GGA carries an HDOP of its own and it is deliberately IGNORED: the DOP triple
+ * is taken as a unit from GSA so PDOP, HDOP and VDOP always describe the same
+ * solution.  Taking GGA's here would also make the result depend on the order the
+ * two sentences happen to arrive in.
+ */
+static void gnss_gga(struct fm160_gnss_reading *r, int nf, char *f[])
+{
+	int lat, lon;
+
+	if (nf < 7)
+		return;
+	if (f[1][0])
+		snprintf(r->utc, sizeof(r->utc), "%s", f[1]);
+
+	lat = nmea_degrees_1e7(f[2]);
+	lon = nmea_degrees_1e7(f[4]);
+	if (lat != FM160_NONE && lon != FM160_NONE) {
+		r->lat_ns = f[3][0];
+		r->lon_ew = f[5][0];
+		r->lat_1e7 = (r->lat_ns == 'S') ? -lat : lat;
+		r->lon_1e7 = (r->lon_ew == 'W') ? -lon : lon;
+		r->has_position = true;
+	}
+
+	r->quality = nmea_int(f[6]);
+	if (r->quality == FM160_NONE)
+		r->quality = 0;
+	if (nf > 7)
+		r->sats_in_use = nmea_int(f[7]);
+	if (nf > 9)
+		r->alt_dm = nmea_x10(f[9]);
+	if (nf > 11)
+		r->geoid_dm = nmea_x10(f[11]);
+}
+
+/*
+ * $--RMC,<utc>,<status>,<lat>,<N/S>,<lon>,<E/W>,<speed knots>,<course>,<date>
+ *
+ * <status> is 'A' (valid) or 'V' (void).  A void sentence still carries fields,
+ * usually the last position the receiver had, so the position is only taken when
+ * the status is 'A' - otherwise a stale fix would be displayed as a live one.
+ *
+ * Speed arrives in knots and is stored in cm/s, the unit the rest of the
+ * daemon's face-value integers use.  1 knot = 51.4444 cm/s.
+ */
+static void gnss_rmc(struct fm160_gnss_reading *r, int nf, char *f[])
+{
+	int lat, lon;
+
+	if (nf < 10)
+		return;
+	if (f[1][0] && !r->utc[0])
+		snprintf(r->utc, sizeof(r->utc), "%s", f[1]);
+	if (f[9][0])
+		snprintf(r->date, sizeof(r->date), "%s", f[9]);
+	if (f[2][0] != 'A')
+		return;
+
+	lat = nmea_degrees_1e7(f[3]);
+	lon = nmea_degrees_1e7(f[5]);
+	if (lat != FM160_NONE && lon != FM160_NONE) {
+		r->lat_ns = f[4][0];
+		r->lon_ew = f[6][0];
+		r->lat_1e7 = (r->lat_ns == 'S') ? -lat : lat;
+		r->lon_1e7 = (r->lon_ew == 'W') ? -lon : lon;
+		r->has_position = true;
+	}
+	if (f[7][0])
+		r->speed_cmps = (int)(strtod(f[7], NULL) * 51.4444 + 0.5);
+	r->course_d10 = nmea_x10(f[8]);
+}
+
+/* Keep the sentences verbatim for the page's raw-output box.  Truncation is
+ * recorded through raw_len, so the page can say the text is incomplete instead of
+ * showing a silently shortened block. */
+static void gnss_remember_raw(struct fm160_gnss_reading *r, const char *line,
+			      size_t len)
+{
+	if (r->raw_len + (int)len + 2 >= FM160_GNSS_RAW_MAX)
+		return;
+	memcpy(r->raw + r->raw_len, line, len);
+	r->raw_len += (int)len;
+	r->raw[r->raw_len++] = '\n';
+	r->raw[r->raw_len] = '\0';
+}
+
+/* One line: verify it, then dispatch on its formatter.
+ *
+ * The checksum gate comes FIRST, before the line is looked at in any other way.
+ * A sentence whose *hh does not match may have been corrupted anywhere,
+ * including in its formatter, so nothing in it can be trusted - not even the
+ * question "is this a well-formed sentence?".  The visible consequence is that
+ * a short formatter with a bad checksum is counted as bad_checksum rather than
+ * bad_shape; that is the honest classification, and it is why bad_shape should
+ * be read as "the module emitted something structurally wrong" only among the
+ * sentences that passed the checksum.
+ */
+static void gnss_sentence(struct fm160_gnss_reading *r, char *line, size_t line_len)
+{
+	char *star, *f[NMEA_FIELD_MAX], tk[4];
+	const char *form;
+	size_t blen;
+	int want, nf;
+
+	if (*line != '$') {
+		r->bad_shape++;
+		return;
+	}
+	star = strrchr(line, '*');
+	if (!star || strlen(star + 1) < 2) {
+		r->bad_shape++;
+		return;
+	}
+
+	blen = (size_t)(star - (line + 1));
+	want = (int)strtol(star + 1, NULL, 16);
+	if (!nmea_checksum_ok(line + 1, blen, (unsigned)want)) {
+		r->bad_checksum++;
+		return;
+	}
+	*star = '\0';      /* the body is now a plain NUL-terminated string */
+
+	nf = nmea_split(line + 1, f, NMEA_FIELD_MAX);
+	if (nf < 1 || strlen(f[0]) < 5) {
+		r->bad_shape++;
+		return;
+	}
+
+	form = f[0] + 2;                                   /* "GSV", "GSA", ... */
+	snprintf(tk, sizeof(tk), "%c%c", f[0][0], f[0][1]);
+
+	r->sentences++;
+	r->nmea_bytes += (int)line_len;
+
+	if (!strcmp(form, "GSV"))
+		gnss_gsv(r, tk, nf, f);
+	else if (!strcmp(form, "GSA"))
+		gnss_gsa(r, tk, nf, f);
+	else if (!strcmp(form, "GGA"))
+		gnss_gga(r, nf, f);
+	else if (!strcmp(form, "RMC"))
+		gnss_rmc(r, nf, f);
+	else
+		r->ignored++;    /* VTG, ZDA, GLL, GST, TXT ... counted, not parsed */
+}
+
+/*
+ * Fold the two halves together once the whole block has been read.
+ *
+ * GSA carries the PRN lists and GSV carries the satellites, and nothing
+ * guarantees which of the two comes first - so "is this satellite part of the
+ * fix" can only be answered for the block as a whole.  The constellation totals
+ * are summed here for the same reason: a GSV that arrived before its GSA has its
+ * <in view> count already, and one that arrived after does too, so the sum must
+ * happen at the end rather than as each sentence is parsed.
+ */
+static void gnss_link_fix(struct fm160_gnss_reading *r)
+{
+	int i, j, total = 0, best = FM160_NONE;
+
+	for (i = 0; i < r->cons_n; i++) {
+		if (r->cons[i].visible != FM160_NONE)
+			total += r->cons[i].visible;
+		if (r->cons[i].snr_best_db != FM160_NONE &&
+		    (best == FM160_NONE || r->cons[i].snr_best_db > best))
+			best = r->cons[i].snr_best_db;
+	}
+	for (j = 0; j < r->sats_n; j++) {
+		struct fm160_gnss_sat *s = &r->sats[j];
+		struct fm160_gnss_const *c;
+		int k;
+
+		if (s->const_idx < 0 || s->const_idx >= r->cons_n) {
+			s->in_fix = false;
+			continue;
+		}
+		c = &r->cons[s->const_idx];
+		s->in_fix = false;
+		for (k = 0; k < c->used_n; k++)
+			if (c->used_prn[k] == s->prn) {
+				s->in_fix = true;
+				break;
+			}
+	}
+	r->visible_total = total;
+	r->snr_best_db = best;
+}
+
+/* The values a fresh reading starts from.  Every one of these is a field the
+ * modem leaves EMPTY while there is no fix, so a default of 0 would be a wrong
+ * value rather than an unfilled one. */
+static void gnss_reading_defaults(struct fm160_gnss_reading *r)
+{
+	r->fix_type = FM160_NONE;
+	r->pdop_x10 = r->hdop_x10 = r->vdop_x10 = FM160_NONE;
+	r->quality = FM160_NONE;
+	r->sats_in_use = FM160_NONE;
+	r->alt_dm = r->geoid_dm = FM160_NONE;
+	r->speed_cmps = r->course_d10 = FM160_NONE;
+	r->snr_best_db = FM160_NONE;
+	r->gsv_trailing_value = FM160_NONE;
+}
+
+/*
+ * AT+GTGPS? - the whole NMEA block.
+ *
+ * Measured shape (engine on, no fix, 8 sentences):
+ *
+ *   \r\n+GTGPS: \r\n
+ *   $GPGSA,A,1,,,,,,,,,,,,,,,,*32
+ *   $BDGSA,... $GAGSA,... $PQGSA,...
+ *   $GPGSV,1,1,0,1*54   $BDGSV,... $GLGSV,... $GAGSV,1,1,0,7*43
+ *   \r\nOK\r\n
+ *
+ * Three consequences, all of them handled below:
+ *   - the header carries no data, so every line is examined for '$';
+ *   - only GSA and GSV are present, because position and time sentences are
+ *     omitted while there is no fix.  "The block is healthy" therefore CANNOT be
+ *     defined as "it contains an RMC" - it is defined as "it contains sentences
+ *     whose checksums match";
+ *   - an OK with no sentence at all is a normal, measured state (the first read
+ *     after switching the engine on), so it must not be reported as a failure.
+ */
+void fm160_parse_gnss(const char *resp)
+{
+	struct fm160_gnss_state *g = &g_state.gnss;
+	struct fm160_gnss_reading r;
+	const char *p;
+	uint64_t now = fm160_now_ms();
+
+	if (!resp)
+		return;
+
+	memset(&r, 0, sizeof(r));
+	gnss_reading_defaults(&r);
+	r.resp_bytes = (int)strlen(resp);
+
+	p = strstr(resp, "+GTGPS:");
+	if (!p) {
+		/* No header and no error: not a shape this parser has ever seen.
+		 * Leave the previous picture alone rather than half-updating it. */
+		fm160_log(LOG_DEBUG, "GNSS: no +GTGPS header in the answer");
+		return;
+	}
+
+	while (*p) {
+		const char *eol = p + strcspn(p, "\r\n");
+		size_t len = (size_t)(eol - p);
+		char line[FM160_RESP_LINE_MAX];
+
+		if (len) {
+			if (len >= sizeof(line)) {
+				r.bad_shape++;
+			} else {
+				memcpy(line, p, len);
+				line[len] = '\0';
+				/* '$' is the only test needed to pick the sentences
+				 * out of the response: the echoed command, the header,
+				 * the blank line and the final OK all fail it. */
+				if (line[0] == '$') {
+					gnss_remember_raw(&r, line, len);
+					gnss_sentence(&r, line, len);
+				}
+			}
+		}
+		p = *eol ? eol + 1 : eol;
+	}
+
+	if (!r.sentences && !r.bad_checksum && !r.bad_shape && !r.ignored) {
+		/* OK, but not one sentence yet - measured right after
+		 * AT+GTGPSPOWER=1, while the receiver is still coming up.
+		 *
+		 * That is neither an error nor "there are no satellites", so the
+		 * picture is left exactly as it was, INCLUDING its timestamp: an
+		 * empty poll is not a new reading, and moving read_ms here would
+		 * make ten-minute-old satellites look like they arrived just now.
+		 * Only the poll outcome is recorded.  `empty_frames` counts them in
+		 * a row, which is what separates "the engine is still starting" from
+		 * "the engine claims to be on but never produces a sentence". */
+		g->r.empty_frame  = true;
+		g->r.empty_frames++;
+		g->r.empty_ms     = now;
+		g->r.empty_bytes  = r.resp_bytes;
+		g->r.read_error   = false;
+		fm160_log(LOG_DEBUG, "GNSS: empty frame (%d bytes), no sentence yet",
+			  r.resp_bytes);
+		fm160_state_mark_dirty();
+		return;
+	}
+
+	gnss_link_fix(&r);
+	r.read_ms = now;
+	r.empty_frame = false;
+	r.read_error = false;
+
+	{
+		bool first_sentences = g->r.sentences == 0 && r.sentences > 0;
+		bool fix_appeared = !g->r.has_position && r.has_position;
+
+		g->r = r;
+
+		if (fix_appeared)
+			fm160_log(LOG_INFO,
+				  "GNSS: position fix acquired (%d satellite(s) in use, %d visible)",
+				  r.sats_used, r.visible_total);
+		else if (first_sentences)
+			fm160_log(LOG_INFO,
+				  "GNSS: %d sentence(s), %d visible, fix type %d",
+				  r.sentences, r.visible_total, r.fix_type);
+		else
+			fm160_log(LOG_DEBUG,
+				  "GNSS: %d sentence(s), %d visible, fix type %d",
+				  r.sentences, r.visible_total, r.fix_type);
+	}
+	fm160_state_mark_dirty();
+}
+
+/* ------------------------------------------------------------------ */
+/* M5 parsers: engine, configuration, AGPS                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * AT+GTGPSPOWER? -> "+GTGPSPOWER: 0|1"
+ *
+ * Asked for rather than remembered: the module does not store this setting, so
+ * after a power cycle the engine is off again and a cached value would be a
+ * confident lie until the next poll.
+ */
+void fm160_parse_gnss_power(const char *resp)
+{
+	char buf[FM160_STR_MAX];
+	struct fm160_gnss_engine *e = &g_state.gnss.engine;
+	bool was_on = e->on;
+
+	if (!fm160_resp_find(resp, "+GTGPSPOWER:", buf, sizeof(buf)))
+		return;
+
+	e->known = true;
+	e->on = (atoi(buf) == 1);
+	e->last_ok_ms = fm160_now_ms();
+	if (was_on != e->on)
+		fm160_log(LOG_INFO, "GNSS engine is now %s", e->on ? "on" : "off");
+	fm160_state_mark_dirty();
+}
+
+/*
+ * AT+GTGPSCFG? -> a header and then one "<x>,<value>" line per group.
+ *
+ * Measured: "0,2" / "2,14" / "3,0" - three lines against a manual that documents
+ * four groups, i.e. x=1 (xtra) is simply not reported by this firmware.  The
+ * lines are therefore matched BY THEIR x and never by their position; a missing
+ * line is a reported state (xtra_present) rather than a parse failure, and an x
+ * this parser does not know is counted instead of being folded into its
+ * neighbour.
+ *
+ * The fields are written into g_state.gnss.cfg one by one instead of assigning a
+ * whole fresh struct, because the same struct also holds the capability list the
+ * write path depends on - and a plain read of the current value has no business
+ * invalidating the licence to change it.
+ */
+void fm160_parse_gnss_cfg(const char *resp)
+{
+	struct fm160_gnss_cfg *cfg = &g_state.gnss.cfg;
+	const char *p;
+
+	if (!resp)
+		return;
+	p = strstr(resp, "+GTGPSCFG");
+	if (!p)
+		return;
+	p = strchr(p, '\n');
+	if (!p)
+		return;
+	p++;
+
+	cfg->supl_version = FM160_NONE;
+	cfg->constellation = FM160_NONE;
+	cfg->cert = FM160_NONE;
+	cfg->xtra = FM160_NONE;
+	cfg->xtra_present = false;
+	cfg->unknown = 0;
+
+	while (*p) {
+		const char *eol = p + strcspn(p, "\r\n");
+		size_t len = (size_t)(eol - p);
+
+		if (len && len < FM160_STR_MAX) {
+			char line[FM160_STR_MAX], *comma;
+
+			memcpy(line, p, len);
+			line[len] = '\0';
+			comma = strchr(line, ',');
+			if (comma && line[0] >= '0' && line[0] <= '9') {
+				int x = atoi(line);
+				int v = comma[1] ? atoi(comma + 1) : FM160_NONE;
+
+				switch (x) {
+				case 0:  cfg->supl_version = v; break;
+				case 1:  cfg->xtra_present = true; cfg->xtra = v; break;
+				case 2:  cfg->constellation = v; break;
+				case 3:  cfg->cert = v; break;
+				default: cfg->unknown++; break;
+				}
+			}
+		}
+		p = *eol ? eol + 1 : eol;
+	}
+
+	cfg->valid = true;
+	cfg->last_ok_ms = fm160_now_ms();
+	fm160_log(LOG_INFO,
+		  "GNSS config: constellation=%d supl=%d xtra=%s cert=%d",
+		  cfg->constellation, cfg->supl_version,
+		  cfg->xtra_present ? "reported" : "absent", cfg->cert);
+	fm160_state_mark_dirty();
+}
+
+/*
+ * One parenthesised capability group, as a list of values.
+ *
+ * The manual writes value lists as "(0,1,2)" but the M4 capability answers on
+ * this firmware use ranges for some fields, so both forms are accepted.  A MIXED
+ * form ("0,1-3") is refused rather than expanded: expanding it can only produce a
+ * superset, and a superset here weakens the gate that keeps unverified values out
+ * of a persistent write.
+ */
+static int gnss_cap_expand(const char *group, int *out, int max)
+{
+	const char *comma = strchr(group, ',');
+	const char *hyphen = strchr(group, '-');
+
+	if (comma) {
+		if (hyphen)
+			return 0;
+		return parse_int_list(group, out, max);
+	}
+	if (!hyphen)
+		return parse_int_list(group, out, max);
+
+	{
+		int lo = atoi(group), hi = atoi(hyphen + 1), v, n = 0;
+
+		if (hi < lo || hi - lo > 256)
+			return 0;
+		for (v = lo; v <= hi && n < max; v++)
+			out[n++] = v;
+		return n;
+	}
+}
+
+/*
+ * AT+GTGPSCFG=? -> the licence for the constellation write.
+ *
+ * ⚠️ This answer was NEVER measured.  The guide prints a four-group list for it,
+ * but the same guide's "=? response head" column is wrong for two other commands
+ * in the same table (AT-FACTS 10.6), and the module already proved it does not
+ * report all four groups in the "?" form.  So the layout is not assumed: every
+ * parenthesised group is split with the helper the M4 parser uses, every integer
+ * found anywhere goes into one flat list, and the write path then requires the
+ * value to be in THAT list and in the guide's set for x=2.  The intersection can
+ * only ever be too strict, which is the safe direction for a persistent write.
+ */
+void fm160_parse_gnss_cfg_caps(const char *resp)
+{
+	char groups[8][FM160_RESP_LINE_MAX];
+	struct fm160_gnss_cfg *cfg = &g_state.gnss.cfg;
+	const char *p;
+	int ng, i, k;
+
+	if (!resp)
+		return;
+	p = strstr(resp, "+GTGPSCFG");
+	if (!p)
+		p = resp;
+
+	ng = split_groups(p, groups, ARRAY_SIZE(groups));
+
+	cfg->caps_n = 0;
+	memset(cfg->caps_values, 0, sizeof(cfg->caps_values));
+	cfg->caps_groups = ng;
+
+	for (i = 0; i < ng; i++) {
+		int vals[FM160_GNSS_CAP_MAX];
+		int n = gnss_cap_expand(groups[i], vals, ARRAY_SIZE(vals));
+
+		for (k = 0; k < n; k++) {
+			int j;
+			bool dup = false;
+
+			for (j = 0; j < cfg->caps_n; j++)
+				if (cfg->caps_values[j] == vals[k])
+					dup = true;
+			if (!dup && cfg->caps_n < FM160_GNSS_CAP_MAX)
+				cfg->caps_values[cfg->caps_n++] = vals[k];
+		}
+	}
+
+	cfg->caps_valid = cfg->caps_n > 0;
+	fm160_log(LOG_INFO, "GNSS config caps: %d value(s) in %d group(s) - %s",
+		  cfg->caps_n, ng, cfg->caps_valid ? "writing is licensed" :
+		  "no value list, writing stays disabled");
+	fm160_state_mark_dirty();
+}
+
+/* AT+GTGPSEPO? -> "+GTGPSEPO: <x>", 0 off / 1 MSB / 2 MSA.  The guide's own
+ * example says "(0,2)" while the module answers "(0-2)"; read-only here, so the
+ * difference only decides what the page can display. */
+void fm160_parse_gnss_epo(const char *resp)
+{
+	char buf[FM160_STR_MAX];
+
+	if (!fm160_resp_find(resp, "+GTGPSEPO:", buf, sizeof(buf)))
+		return;
+	g_state.gnss.agps.epo = atoi(buf);
+	g_state.gnss.agps.valid = true;
+	g_state.gnss.agps.last_ok_ms = fm160_now_ms();
+	fm160_state_mark_dirty();
+}
+
+/* AT+GTAGPSSERV? -> '+GTAGPSSERV: "supl.qxwz.com",7276'
+ *
+ * The command name carries TWO S's (GT-AGPS-SERV).  Read-only, and the vendor's
+ * default is a Chinese SUPL server, which is worth showing: AGPS is the one part
+ * of this subsystem that cannot work without a data connection. */
+void fm160_parse_gnss_supl(const char *resp)
+{
+	char buf[FM160_STR_MAX];
+	char *open, *close, *comma;
+
+	if (!fm160_resp_find(resp, "+GTAGPSSERV:", buf, sizeof(buf)))
+		return;
+
+	open = strchr(buf, '"');
+	close = open ? strchr(open + 1, '"') : NULL;
+	if (open && close) {
+		*close = '\0';
+		snprintf(g_state.gnss.agps.server,
+			 sizeof(g_state.gnss.agps.server), "%s", open + 1);
+		comma = strchr(close + 1, ',');
+	} else {
+		comma = strchr(buf, ',');
+		if (comma) {
+			*comma = '\0';
+			snprintf(g_state.gnss.agps.server,
+				 sizeof(g_state.gnss.agps.server), "%s", buf);
+		}
+	}
+	if (comma && comma[1])
+		g_state.gnss.agps.port = atoi(comma + 1);
+
+	g_state.gnss.agps.valid = true;
+	g_state.gnss.agps.last_ok_ms = fm160_now_ms();
+	fm160_state_mark_dirty();
+}
+
+/* ------------------------------------------------------------------ */
+/* M5 polls and write paths                                             */
+/* ------------------------------------------------------------------ */
+
+static void gnss_cb(struct at_req *r, enum at_status s, const char *resp, void *a)
+{
+	bool first = !g_state.gnss.r.read_error;
+
+	if (s == AT_STATUS_OK) {
+		fm160_parse_gnss(resp);
+		return;
+	}
+
+	/* ERROR here is not a broken AT link and not a parse failure: with the
+	 * engine off, AT+GTGPS? answers ERROR (measured).  The poll only runs
+	 * while the cached power state says the engine is on, so getting here
+	 * means the engine was switched off behind us - record that rather than
+	 * counting it against the circuit breaker. */
+	g_state.gnss.r.read_error = true;
+	g_state.gnss.r.read_ms = fm160_now_ms();
+	fm160_log(LOG_DEBUG, "GNSS read answered status %d (engine off?)", s);
+	fm160_state_mark_dirty();
+
+	/* One power read to find out whether the engine is still on - guarded so
+	 * that a module answering ERROR repeatedly is not asked twice every round,
+	 * and so that the recovery costs one transaction rather than waiting for
+	 * the power tier's idle interval (10 minutes with no page open). */
+	if (first)
+		fm160_cmd_poll_gnss_power();
+}
+
+/*
+ * AT+GTGPS? - 30 ms measured for the whole eight-sentence block, i.e. cheaper
+ * than the cell query next to it in the tier table.
+ *
+ * Never submitted while the engine is off: the answer would be ERROR every time,
+ * and on a Qualcomm AT parser a wasted transaction is the thing to avoid rather
+ * than the thing to tolerate.
+ */
+void fm160_cmd_poll_gnss(void)
+{
+	char cmd[FM160_AT_CMD_MAX];
+
+	if (!g_state.gnss.engine.on)
+		return;
+	if (fm160_gnss_item_command(cmd, sizeof(cmd), NULL))
+		return;
+	atq_submit(AT_PRIO_POLL, cmd, NULL, 3000, gnss_cb, NULL);
+}
+
+static void gnss_power_cb(struct at_req *r, enum at_status s, const char *resp, void *a)
+{
+	if (s == AT_STATUS_OK)
+		fm160_parse_gnss_power(resp);
+}
+
+void fm160_cmd_poll_gnss_power(void)
+{
+	/* 22 ms.  Always submitted, even though the engine is usually off: this
+	 * read is the only thing that can notice either an engine switched on
+	 * from elsewhere or the module coming back from a power cycle with the
+	 * switch reset to 0. */
+	atq_submit(AT_PRIO_POLL, "AT+GTGPSPOWER?", NULL, 3000, gnss_power_cb, NULL);
+}
+
+/*
+ * Switch the GNSS engine.
+ *
+ * No capability gate, and the reason is precisely that this setting is the one
+ * GNSS command the module does NOT store: the guide says so (Require Data Store
+ * at Power Down = No) and hardware confirmed it, since the engine reads back as 0
+ * after a power cycle.  A wrong value therefore cannot survive anything, and both
+ * values were exercised end to end (AT-FACTS 10.0/10.4).  Compare the
+ * constellation write below, which is persistent and does need a licence.
+ *
+ * No quiet window either, and that one is deliberate in the other direction: the
+ * window exists to keep polls off a module that has work to do (a band re-scan, an
+ * EFS commit), while this is a 50 ms switch that changes neither registration nor
+ * the data path.  Opening one would actively hurt, because a POLL-priority read
+ * is BLOCKED by an open window - and the point of switching the engine on is to
+ * see NMEA as soon as it exists.
+ */
+int fm160_cmd_set_gnss_power(int on, at_done_cb cb, void *arg)
+{
+	char cmd[FM160_AT_CMD_MAX];
+
+	if (fm160_gnss_power_command(cmd, sizeof(cmd), on))
+		return -1;
+
+	fm160_log(LOG_WARNING, "GNSS power write: %s", cmd);
+	/* The follow-up asks for the NMEA block straight away.  The engine needs a
+	 * moment before it produces sentences - the first read after switching it
+	 * on is empty - and an empty frame is a state the parser already reports,
+	 * so asking is both free and the fastest way to get the page out of its
+	 * "engine on, nothing yet" state. */
+	if (cfg_write(cmd, "AT+GTGPSPOWER?", 8000, QUIET_NONE, NULL, 0,
+		      fm160_parse_gnss_power, fm160_cmd_poll_gnss, cb, arg))
+		return -1;
+	return 0;
+}
+
+/*
+ * Write the satellite combination.
+ *
+ * This one IS stored in the module, so it follows the M4 rule to the letter: the
+ * write is refused unless the modem answered AT+GTGPSCFG=?, and the value must
+ * also appear in that answer.  Two independent checks and neither of them is the
+ * source of the values the page offers - the page offers the guide's set, so a
+ * firmware with a wider list still cannot be sent something that means nothing.
+ *
+ * The caller is answered only after AT+GTGPSCFG? has been read back, so the page
+ * can compare what it asked for with what the module now reports.  That
+ * comparison is left to the page on purpose: the daemon cannot know whether a
+ * reinterpreted value is wrong, but the person reading the page can.
+ */
+int fm160_cmd_set_gnss_cfg(int value, at_done_cb cb, void *arg)
+{
+	char cmd[FM160_AT_CMD_MAX];
+	int i;
+	bool listed = false;
+
+	if (!g_state.gnss.cfg.caps_valid) {
+		fm160_log(LOG_WARNING,
+			  "refusing to write GNSS config: AT+GTGPSCFG=? never enumerated");
+		return -1;
+	}
+	if (fm160_gnss_cfg_command(cmd, sizeof(cmd), value))
+		return -1;
+	for (i = 0; i < g_state.gnss.cfg.caps_n; i++)
+		if (g_state.gnss.cfg.caps_values[i] == value)
+			listed = true;
+	if (!listed) {
+		fm160_log(LOG_WARNING,
+			  "refusing to write GNSS config %d: not in the modem's AT+GTGPSCFG=? answer",
+			  value);
+		return -1;
+	}
+
+	fm160_log(LOG_WARNING, "GNSS configuration write: %s", cmd);
+	if (cfg_write(cmd, "AT+GTGPSCFG?", 8000, QUIET_NONE, NULL, 0,
+		      fm160_parse_gnss_cfg, fm160_cmd_poll_gnss, cb, arg))
+		return -1;
+	return 0;
+}
+
+/*
+ * Apply uci's "switch the engine on at boot" wish, once per ident run.
+ *
+ * AT+GTGPSPOWER is not stored by the module, which is exactly why this exists:
+ * without it the wish would silently revert at every router reboot, and the only
+ * symptom would be a page saying "engine off" for no visible reason.
+ *
+ * Once per ident run, NOT once per observation.  The engine state is polled, and
+ * re-applying whenever it is seen to be off would fight the user's own "switch it
+ * off" click forever.  An ident run happens at boot and again if the module
+ * disappears and comes back, which is the case this is meant to cover.
+ */
+void fm160_cmd_gnss_autostart(void)
+{
+	if (!g_state.gnss.autostart || g_state.gnss.autostart_done)
+		return;
+	if (!g_state.gnss.engine.known)
+		return;      /* nothing to compare against yet - wait for the read */
+	g_state.gnss.autostart_done = true;
+
+	if (g_state.gnss.engine.on) {
+		fm160_log(LOG_DEBUG, "GNSS autostart: the engine is already on");
+		return;
+	}
+	fm160_log(LOG_INFO, "GNSS autostart: switching the engine on");
+	if (fm160_cmd_set_gnss_power(1, NULL, NULL))
+		fm160_log(LOG_WARNING, "GNSS autostart: the write was not accepted");
+}

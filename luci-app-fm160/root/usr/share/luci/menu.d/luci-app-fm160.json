@@ -33,6 +33,14 @@
 			"path": "fm160/cells"
 		}
 	},
+	"admin/fm160/gnss": {
+		"title": "GNSS",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "fm160/gnss"
+		}
+	},
 	"admin/fm160/debug": {
 		"title": "AT 调试",
 		"order": 90,

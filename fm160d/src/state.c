@@ -129,6 +129,27 @@ void fm160_state_init(void)
 	g_state.cesq_rsrq = 255;
 	g_state.tier_scale = 1;
 	g_state.enabled = true;
+
+	/* M5.  Every field the modem leaves EMPTY while there is no fix is seeded
+	 * with FM160_NONE rather than 0, so a page cannot tell "0 satellites used"
+	 * apart from "the modem had nothing to report" -- see the notes above
+	 * struct fm160_gnss_reading. */
+	g_state.gnss.cfg.supl_version = FM160_NONE;
+	g_state.gnss.cfg.constellation = FM160_NONE;
+	g_state.gnss.cfg.cert = FM160_NONE;
+	g_state.gnss.cfg.xtra = FM160_NONE;
+	g_state.gnss.r.fix_type = FM160_NONE;
+	g_state.gnss.r.pdop_x10 = FM160_NONE;
+	g_state.gnss.r.hdop_x10 = FM160_NONE;
+	g_state.gnss.r.vdop_x10 = FM160_NONE;
+	g_state.gnss.r.quality = FM160_NONE;
+	g_state.gnss.r.sats_in_use = FM160_NONE;
+	g_state.gnss.r.alt_dm = FM160_NONE;
+	g_state.gnss.r.geoid_dm = FM160_NONE;
+	g_state.gnss.r.speed_cmps = FM160_NONE;
+	g_state.gnss.r.course_d10 = FM160_NONE;
+	g_state.gnss.r.snr_best_db = FM160_NONE;
+	g_state.gnss.r.gsv_trailing_value = FM160_NONE;
 	dirty = true;
 }
 
@@ -523,6 +544,186 @@ struct blob_buf *fm160_state_blob(void)
 	}
 
 	blobmsg_close_table(&b, m4);
+
+	/* --- M5: GNSS -------------------------------------------------- */
+	/*
+	 * Published as its own top-level table rather than grouped by milestone
+	 * like "m4": GNSS is a subsystem with a switch, a per-read picture and its
+	 * own write gate, not three loosely related settings on one screen.
+	 *
+	 * Two conventions matter to whoever reads this blob from JavaScript:
+	 *
+	 *   - FM160_NONE (-1000000) goes out through blobmsg_add_u32/u64, so it
+	 *     arrives as 4293967296 / 18446744073708551616 rather than as a
+	 *     negative number.  api.js's reported() exists for exactly that.  It is
+	 *     deliberately NOT used for lat_1e7/lon_1e7: -0.1 degrees is a legal
+	 *     coordinate, so has_position is the only valid gate there, and those
+	 *     two fields are also signed - the same u32 round trip turns a western
+	 *     longitude into a large positive number, which api.gnssCoord()
+	 *     undoes.
+	 *
+	 *   - "empty" and "zero" are different answers everywhere below.  Zero
+	 *     satellites in view is a measurement; an absent DOP or elevation is
+	 *     the absence of one.  A page that renders both as "0" would be
+	 *     inventing data.
+	 */
+	{
+		void *g = blobmsg_open_table(&b, "gnss");
+		const struct fm160_gnss_reading *gr = &g_state.gnss.r;
+		char ns[2] = { gr->lat_ns, '\0' };
+		char ew[2] = { gr->lon_ew, '\0' };
+		void *t;
+		int k;
+
+		t = blobmsg_open_table(&b, "engine");
+		blobmsg_add_u8(&b, "known", g_state.gnss.engine.known);
+		blobmsg_add_u8(&b, "on", g_state.gnss.engine.on);
+		blobmsg_add_u8(&b, "autostart", g_state.gnss.autostart);
+		if (g_state.gnss.engine.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.gnss.engine.last_ok_ms);
+		blobmsg_close_table(&b, t);
+
+		/* The last NMEA read, and how much of it made sense. */
+		t = blobmsg_open_table(&b, "read");
+		blobmsg_add_u32(&b, "sentences", (uint32_t)gr->sentences);
+		blobmsg_add_u32(&b, "nmea_bytes", (uint32_t)gr->nmea_bytes);
+		blobmsg_add_u32(&b, "resp_bytes", (uint32_t)gr->resp_bytes);
+		blobmsg_add_u32(&b, "bad_checksum", (uint32_t)gr->bad_checksum);
+		blobmsg_add_u32(&b, "bad_shape", (uint32_t)gr->bad_shape);
+		blobmsg_add_u32(&b, "ignored", (uint32_t)gr->ignored);
+		blobmsg_add_u8(&b, "empty_frame", gr->empty_frame);
+		/* Empty answers in a row.  "Engine on" + a climbing count is a real
+		 * fault; one or two right after the engine is switched on is the
+		 * measured normal.  empty_ms is when the last of them arrived, and
+		 * age_ms above is the age of the PICTURE - the two differ on
+		 * purpose, see struct fm160_gnss_reading. */
+		blobmsg_add_u32(&b, "empty_frames", (uint32_t)gr->empty_frames);
+		blobmsg_add_u32(&b, "empty_bytes", (uint32_t)gr->empty_bytes);
+		if (gr->empty_ms)
+			blobmsg_add_u64(&b, "empty_age_ms",
+					fm160_now_ms() - gr->empty_ms);
+		blobmsg_add_u8(&b, "read_error", gr->read_error);
+		/* The modem emits one field past the last GSV quad group.  Recorded
+		 * as evidence, never interpreted - see fm160_parse_gnss(). */
+		blobmsg_add_u8(&b, "gsv_trailing", gr->gsv_trailing);
+		if (gr->gsv_trailing_value != FM160_NONE)
+			blobmsg_add_u32(&b, "gsv_trailing_value",
+					(uint32_t)gr->gsv_trailing_value);
+		if (gr->read_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - gr->read_ms);
+		blobmsg_add_u32(&b, "raw_len", (uint32_t)gr->raw_len);
+		blobmsg_add_string(&b, "raw", gr->raw);
+		blobmsg_close_table(&b, t);
+
+		t = blobmsg_open_table(&b, "fix");
+		blobmsg_add_u8(&b, "has_position", gr->has_position);
+		/* 'A'/'M' as the raw character code, 0 when no GSA arrived. */
+		blobmsg_add_u32(&b, "fix_mode", (uint32_t)gr->fix_mode);
+		blobmsg_add_u32(&b, "fix_type", (uint32_t)gr->fix_type);
+		blobmsg_add_u32(&b, "sats_used", (uint32_t)gr->sats_used);
+		blobmsg_add_u32(&b, "sats_in_use", (uint32_t)gr->sats_in_use);
+		blobmsg_add_u32(&b, "quality", (uint32_t)gr->quality);
+		blobmsg_add_u32(&b, "visible", (uint32_t)gr->visible_total);
+		blobmsg_add_u32(&b, "snr_best_db", (uint32_t)gr->snr_best_db);
+		blobmsg_add_u32(&b, "pdop_x10", (uint32_t)gr->pdop_x10);
+		blobmsg_add_u32(&b, "hdop_x10", (uint32_t)gr->hdop_x10);
+		blobmsg_add_u32(&b, "vdop_x10", (uint32_t)gr->vdop_x10);
+		blobmsg_add_u32(&b, "lat_1e7", (uint32_t)gr->lat_1e7);
+		blobmsg_add_u32(&b, "lon_1e7", (uint32_t)gr->lon_1e7);
+		if (gr->lat_ns)
+			blobmsg_add_string(&b, "lat_ns", ns);
+		if (gr->lon_ew)
+			blobmsg_add_string(&b, "lon_ew", ew);
+		blobmsg_add_u32(&b, "alt_dm", (uint32_t)gr->alt_dm);
+		blobmsg_add_u32(&b, "geoid_dm", (uint32_t)gr->geoid_dm);
+		blobmsg_add_u32(&b, "speed_cmps", (uint32_t)gr->speed_cmps);
+		blobmsg_add_u32(&b, "course_d10", (uint32_t)gr->course_d10);
+		blobmsg_add_string(&b, "utc", gr->utc);
+		blobmsg_add_string(&b, "date", gr->date);
+		blobmsg_close_table(&b, t);
+
+		/* One row per constellation: what the modem CLAIMS (visible) next to
+		 * what it actually showed (parsed), so a truncated response is
+		 * visible as a difference instead of as a smaller list. */
+		t = blobmsg_open_array(&b, "constellations");
+		for (k = 0; k < g_state.gnss.r.cons_n; k++) {
+			const struct fm160_gnss_const *c = &g_state.gnss.r.cons[k];
+			void *row = blobmsg_open_table(&b, NULL);
+
+			blobmsg_add_string(&b, "talker", c->talker);
+			blobmsg_add_u32(&b, "kind", (uint32_t)c->kind);
+			blobmsg_add_u32(&b, "visible", (uint32_t)c->visible);
+			blobmsg_add_u32(&b, "parsed", (uint32_t)c->parsed);
+			blobmsg_add_u32(&b, "in_fix", (uint32_t)c->in_fix);
+			blobmsg_add_u32(&b, "snr_best_db", (uint32_t)c->snr_best_db);
+			blobmsg_close_table(&b, row);
+		}
+		blobmsg_close_array(&b, t);
+
+		t = blobmsg_open_array(&b, "satellites");
+		for (k = 0; k < g_state.gnss.r.sats_n; k++) {
+			const struct fm160_gnss_sat *s = &g_state.gnss.r.sats[k];
+			const char *talker = "";
+			void *row;
+
+			if (s->const_idx >= 0 && s->const_idx < g_state.gnss.r.cons_n)
+				talker = g_state.gnss.r.cons[s->const_idx].talker;
+			row = blobmsg_open_table(&b, NULL);
+			blobmsg_add_string(&b, "talker", talker);
+			blobmsg_add_u32(&b, "prn", (uint32_t)s->prn);
+			blobmsg_add_u32(&b, "elev_deg", (uint32_t)s->elev_deg);
+			blobmsg_add_u32(&b, "azim_deg", (uint32_t)s->azim_deg);
+			blobmsg_add_u32(&b, "snr_db", (uint32_t)s->snr_db);
+			blobmsg_add_u8(&b, "in_fix", s->in_fix);
+			blobmsg_close_table(&b, row);
+		}
+		blobmsg_close_array(&b, t);
+
+		/* AT+GTGPSCFG? - the stored configuration, x by x. */
+		t = blobmsg_open_table(&b, "config");
+		blobmsg_add_u8(&b, "valid", g_state.gnss.cfg.valid);
+		blobmsg_add_u32(&b, "constellation",
+				(uint32_t)g_state.gnss.cfg.constellation);
+		blobmsg_add_u32(&b, "supl_version",
+				(uint32_t)g_state.gnss.cfg.supl_version);
+		blobmsg_add_u32(&b, "cert", (uint32_t)g_state.gnss.cfg.cert);
+		/* x=1 is MISSING on this firmware; the flag says which of "the
+		 * modem did not report it" and "the modem reported 0" is true. */
+		blobmsg_add_u8(&b, "xtra_present", g_state.gnss.cfg.xtra_present);
+		blobmsg_add_u32(&b, "xtra", (uint32_t)g_state.gnss.cfg.xtra);
+		blobmsg_add_u32(&b, "unknown", (uint32_t)g_state.gnss.cfg.unknown);
+		if (g_state.gnss.cfg.last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - g_state.gnss.cfg.last_ok_ms);
+		blobmsg_close_table(&b, t);
+
+		/* AT+GTGPSCFG=? - the licence for the constellation write.  A page
+		 * that ignores this will offer a button the daemon refuses. */
+		t = blobmsg_open_table(&b, "config_caps");
+		blobmsg_add_u8(&b, "valid", g_state.gnss.cfg.caps_valid);
+		blobmsg_add_u32(&b, "groups", (uint32_t)g_state.gnss.cfg.caps_groups);
+		{
+			void *arr = blobmsg_open_array(&b, "values");
+
+			for (k = 0; k < g_state.gnss.cfg.caps_n; k++)
+				blobmsg_add_u32(&b, NULL,
+						(uint32_t)g_state.gnss.cfg.caps_values[k]);
+			blobmsg_close_array(&b, arr);
+		}
+		blobmsg_close_table(&b, t);
+
+		/* AGPS, read-only in this milestone. */
+		t = blobmsg_open_table(&b, "agps");
+		blobmsg_add_u8(&b, "valid", g_state.gnss.agps.valid);
+		blobmsg_add_u32(&b, "epo", (uint32_t)g_state.gnss.agps.epo);
+		blobmsg_add_string(&b, "server", g_state.gnss.agps.server);
+		blobmsg_add_u32(&b, "port", (uint32_t)g_state.gnss.agps.port);
+		blobmsg_close_table(&b, t);
+
+		blobmsg_close_table(&b, g);
+	}
 
 	/* --- traffic -------------------------------------------------- */
 	{

@@ -9,7 +9,8 @@
 		},
 		"write": {
 			"ubus": {
-				"fm160": [ "at", "rescan", "ident", "enabled", "profile", "setbands", "setcelllock" ]
+				"fm160": [ "at", "rescan", "ident", "enabled", "profile", "setbands", "setcelllock",
+					   "setgnss", "setgnsscfg" ]
 			},
 			"uci": [ "fm160" ]
 		}

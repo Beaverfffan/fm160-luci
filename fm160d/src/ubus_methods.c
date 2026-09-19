@@ -81,6 +81,26 @@ static const struct blobmsg_policy celllock_policy[] = {
 	[ATTR_NRBAND] = { .name = "nrband", .type = BLOBMSG_TYPE_INT32  },
 };
 
+/* --- M5 ------------------------------------------------------------- */
+
+enum {
+	ATTR_GNSS_ON,
+	__ATTR_GNSS_MAX
+};
+
+static const struct blobmsg_policy gnss_policy[] = {
+	[ATTR_GNSS_ON] = { .name = "enabled", .type = BLOBMSG_TYPE_BOOL },
+};
+
+enum {
+	ATTR_CONSTELLATION,
+	__ATTR_CONSTELLATION_MAX
+};
+
+static const struct blobmsg_policy constellation_policy[] = {
+	[ATTR_CONSTELLATION] = { .name = "constellation", .type = BLOBMSG_TYPE_INT32 },
+};
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                              */
 /* ------------------------------------------------------------------ */
@@ -456,6 +476,81 @@ static int handle_setcelllock(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+/*
+ * --- M5 write handlers ----------------------------------------------
+ *
+ * The engine switch has no capability guard on the daemon side, and the reason
+ * is not laxity: AT+GTGPSPOWER is the one setting in this object that the module
+ * does NOT store, so a wrong value cannot outlive a power cycle, and both 0 and 1
+ * were exercised end to end on hardware.  The constellation write below is
+ * stored, and it carries the full guard: no AT+GTGPSCFG=? answer, no write.
+ *
+ * Neither handler validates the value range beyond what the builder needs.  The
+ * authoritative checks are fm160_gnss_cfg_command() (the documented set) and
+ * fm160_cmd_set_gnss_cfg() (the modem's own list); a second copy here could only
+ * drift away from them.
+ */
+static int handle_setgnss(struct ubus_context *ctx, struct ubus_object *obj,
+			  struct ubus_request_data *req, const char *method,
+			  struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_GNSS_MAX];
+	struct pending_at *p;
+	int on;
+
+	blobmsg_parse(gnss_policy, __ATTR_GNSS_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_GNSS_ON])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	on = blobmsg_get_bool(tb[ATTR_GNSS_ON]) ? 1 : 0;
+
+	if (!g_state.port_found)
+		return UBUS_STATUS_NOT_FOUND;
+	if (g_state.at_state == 2)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	p = pending_begin(ctx, req);
+	if (!p)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	if (fm160_cmd_set_gnss_power(on, manual_at_cb, p))
+		return pending_abort(ctx, p, UBUS_STATUS_UNKNOWN_ERROR);
+	return UBUS_STATUS_OK;
+}
+
+static int handle_setgnsscfg(struct ubus_context *ctx, struct ubus_object *obj,
+			     struct ubus_request_data *req, const char *method,
+			     struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_CONSTELLATION_MAX];
+	struct pending_at *p;
+	int value;
+
+	blobmsg_parse(constellation_policy, __ATTR_CONSTELLATION_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_CONSTELLATION])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	value = (int)blobmsg_get_u32(tb[ATTR_CONSTELLATION]);
+
+	if (!g_state.port_found)
+		return UBUS_STATUS_NOT_FOUND;
+	if (g_state.at_state == 2)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	if (!g_state.gnss.cfg.caps_valid) {
+		fm160_log(LOG_WARNING,
+			  "setgnsscfg refused: AT+GTGPSCFG=? not enumerated");
+		return UBUS_STATUS_NOT_SUPPORTED;
+	}
+
+	p = pending_begin(ctx, req);
+	if (!p)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	if (fm160_cmd_set_gnss_cfg(value, manual_at_cb, p))
+		return pending_abort(ctx, p, UBUS_STATUS_UNKNOWN_ERROR);
+	return UBUS_STATUS_OK;
+}
+
 static const struct ubus_method fm160_methods[] = {
 	UBUS_METHOD_NOARG("status",   handle_status),
 	UBUS_METHOD("profile",   handle_profile,   profile_policy),
@@ -468,6 +563,10 @@ static const struct ubus_method fm160_methods[] = {
 	 * read-back before the answer means anything. */
 	UBUS_METHOD("setbands",     handle_setbands,     bands_policy),
 	UBUS_METHOD("setcelllock",  handle_setcelllock,  celllock_policy),
+	/* M5.  Same deferred contract; "setgnss" is the only write in the whole
+	 * object that is not stored by the module. */
+	UBUS_METHOD("setgnss",      handle_setgnss,      gnss_policy),
+	UBUS_METHOD("setgnsscfg",   handle_setgnsscfg,   constellation_policy),
 };
 
 static struct ubus_object_type fm160_obj_type =

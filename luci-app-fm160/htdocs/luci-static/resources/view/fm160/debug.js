@@ -33,7 +33,12 @@ var SLOW_MS = {
 	'AT+CPMS?':     20000,
 	'AT+CMGF?':     12000,
 	'AT+CIMI':      12000,
-	'AT+CGDCONT?':  12000
+	'AT+CGDCONT?':  12000,
+	/* The one GNSS command whose ANSWER TIME has never been measured: every
+	 * other GNSS command came back in well under 500 ms, but this one was
+	 * never answered on this hardware at all.  A generous timeout costs
+	 * nothing here and turns a possible slow answer into an answer. */
+	'AT+GTGPSCFG=?': 12000
 };
 var DEFAULT_TIMEOUT_MS = 5000;
 
@@ -71,7 +76,16 @@ var QUICK = [
 	'AT+CMGF?',
 	'AT+CNMI?',
 	'AT+GTGPSPOWER?',
-	'AT+GTGPS?'
+	'AT+GTGPS?',
+	/* GNSS, the parts that are safe to poke by hand.  AT+GTGPS=<item> needs
+	 * the item in double quotes - unquoted it answers ERROR, which looks like
+	 * a broken receiver and is not.  AT+GTGPSCFG=? has never been answered on
+	 * this hardware, so it is here to be looked at rather than trusted. */
+	'AT+GTGPS="RMC"',
+	'AT+GTGPSCFG?',
+	'AT+GTGPSCFG=?',
+	'AT+GTGPSEPO?',
+	'AT+GTAGPSSERV?'
 ];
 
 return view.extend({
