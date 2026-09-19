@@ -41,6 +41,14 @@
 			"path": "fm160/gnss"
 		}
 	},
+	"admin/fm160/sms": {
+		"title": "短信",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "fm160/sms"
+		}
+	},
 	"admin/fm160/debug": {
 		"title": "AT 调试",
 		"order": 90,

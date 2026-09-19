@@ -3,14 +3,15 @@
 		"description": "Grant access to the Fibocom FM160 modem manager",
 		"read": {
 			"ubus": {
-				"fm160": [ "status", "identity", "profile" ]
+				"fm160": [ "status", "identity", "profile", "sms_list" ]
 			},
 			"uci": [ "fm160" ]
 		},
 		"write": {
 			"ubus": {
 				"fm160": [ "at", "rescan", "ident", "enabled", "profile", "setbands", "setcelllock",
-					   "setgnss", "setgnsscfg" ]
+					   "setgnss", "setgnsscfg",
+					   "sms_send", "sms_delete", "sms_markread", "sms_sync" ]
 			},
 			"uci": [ "fm160" ]
 		}

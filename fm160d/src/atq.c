@@ -26,6 +26,9 @@
 #define ATQ_STARVE_MS          30000
 #define AT_DAEMON_OBJ          "at-daemon"
 #define AT_DAEMON_RETRY_MS     3000
+/* How long to wait for the "> " that AT+CMGS answers with.  The modem emits it
+ * immediately; the margin is for a busy modem, not for slowness of ours. */
+#define ATQ_PROMPT_TIMEOUT_MS  10000
 
 static struct list_head q_head = LIST_HEAD_INIT(q_head);
 static struct at_req *inflight;
@@ -100,6 +103,40 @@ static void at_req_free(struct at_req *req)
 
 static void atq_dispatch(void);
 
+/*
+ * Retire a request: report it, release the queue slot, start the next one.
+ *
+ * Every path that ends a request's life comes through here.  That is the point
+ * of extracting it: the two-stage path can finish a request *before* anything
+ * has been written to the modem (no prompt ever arrived), and a request retired
+ * anywhere else leaves `inflight` set, at which point the queue stops dead and
+ * every later command sits in it forever.
+ */
+static void atq_finish(struct at_req *req, enum at_status status, const char *resp)
+{
+	if (status == AT_STATUS_OK)
+		fm160_state_touch_ok();
+
+	if (!req->silent)
+		fm160_sched_note_result(status == AT_STATUS_OK,
+					status == AT_STATUS_TIMEOUT);
+	/* Silent requests (port probes) deliberately do not feed the circuit
+	 * breaker: a wrong candidate port must not be counted as a modem fault.
+	 * The probe callback decides what to do with the result. */
+
+	if (status != AT_STATUS_OK)
+		fm160_log(LOG_DEBUG, "AT '%s' -> %s (%s)", req->cmd,
+			  status == AT_STATUS_ERROR ? "error" :
+			  status == AT_STATUS_TIMEOUT ? "timeout" : "?", resp ? resp : "");
+
+	if (req->cb)
+		req->cb(req, status, resp, req->arg);
+
+	inflight = NULL;
+	at_req_free(req);
+	atq_dispatch();
+}
+
 static void sendat_cb(struct ubus_request *ureq, int type, struct blob_attr *msg)
 {
 	struct at_req *req = ureq->priv;
@@ -151,34 +188,96 @@ static void sendat_cb(struct ubus_request *ureq, int type, struct blob_attr *msg
 		status = AT_STATUS_TIMEOUT;
 	}
 
-	if (status == AT_STATUS_OK) {
-		fm160_state_touch_ok();
-		if (rep.response_time_ms > g_state.at_busy_max_ms)
-			g_state.at_busy_max_ms = rep.response_time_ms;
+	if (status == AT_STATUS_OK && rep.response_time_ms > g_state.at_busy_max_ms)
+		g_state.at_busy_max_ms = rep.response_time_ms;
+
+	atq_finish(req, status, resp);
+}
+
+/* ------------------------------------------------------------------ */
+/* two-stage transactions (AT+CMGS / AT+CMGW)                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Outcome of the first stage: did the modem ask for the payload?
+ *
+ * `partial` keeps whatever it said instead.  A refused message answers with a
+ * +CMS ERROR naming the reason, and that line is the only diagnosis available -
+ * dropping it would turn "message too long" into "timeout" on the page.
+ */
+struct stage1 {
+	struct at_req *req;
+	bool seen;
+	enum at_status status;
+	char partial[FM160_RESP_LINE_MAX];
+};
+
+static void prompt_cb(struct ubus_request *ureq, int type, struct blob_attr *msg)
+{
+	struct stage1 *s = ureq->priv;
+	struct blob_attr *tb[ARRAY_SIZE(sendat_policy)];
+	const char *resp = NULL, *matched = NULL, *st = NULL;
+
+	(void)type;
+	s->status = AT_STATUS_TIMEOUT;
+	s->partial[0] = '\0';
+
+	if (msg) {
+		blobmsg_parse(sendat_policy, ARRAY_SIZE(sendat_policy), tb,
+			      blob_data(msg), blob_len(msg));
+		if (tb[0])
+			resp = blobmsg_get_string(tb[0]);
+		if (tb[1])
+			st = blobmsg_get_string(tb[1]);
+		if (tb[2])
+			matched = blobmsg_get_string(tb[2]);
 	}
-	if (!req->silent)
-		fm160_sched_note_result(status == AT_STATUS_OK,
-					status == AT_STATUS_TIMEOUT);
-	/* Silent requests (port probes) deliberately do not feed the circuit
-	 * breaker: a wrong candidate port must not be counted as a modem fault.
-	 * The probe callback decides what to do with the result. */
+	if (resp && *resp)
+		snprintf(s->partial, sizeof(s->partial), "%s", resp);
 
-	if (status != AT_STATUS_OK)
-		fm160_log(LOG_DEBUG, "AT '%s' -> %s (%s)", req->cmd,
-			  status == AT_STATUS_ERROR ? "error" :
-			  status == AT_STATUS_TIMEOUT ? "timeout" : "?", resp ? resp : "");
+	if (resp && strstr(resp, "ERROR")) {
+		s->status = AT_STATUS_ERROR;
+		return;
+	}
+	if (matched && s->req->prompt[0] && !strcmp(matched, s->req->prompt)) {
+		s->seen = true;
+		s->status = AT_STATUS_OK;
+		return;
+	}
+	/* "success" without our prompt means the modem terminated the command on
+	 * its own terms - it answered instead of asking.  There is nothing to
+	 * type into, so this is not a prompt. */
+	if (st && !strcmp(st, "success"))
+		s->status = AT_STATUS_ERROR;
+}
 
-	if (req->cb)
-		req->cb(req, status, resp, req->arg);
+/* One sendat round trip.  The reply, if any, reaches `handler` before this
+ * returns, because ubus_invoke() is synchronous. */
+static int sendat_call(const char *target, const char *field, const char *value,
+		       int secs, const char *end_flag,
+		       void (*handler)(struct ubus_request *, int,
+				       struct blob_attr *),
+		       void *priv, int wait_ms)
+{
+	struct blob_buf b = {};
+	int ret;
 
-	inflight = NULL;
-	at_req_free(req);
-	atq_dispatch();
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "at_port", target);
+	blobmsg_add_string(&b, field, value);
+	blobmsg_add_u32(&b, "timeout", secs);
+	if (end_flag && *end_flag)
+		blobmsg_add_string(&b, "end_flag", end_flag);
+
+	ret = ubus_invoke(g_ubus, at_daemon_id, "sendat", b.head, handler, priv,
+			  wait_ms);
+	blob_buf_free(&b);
+	return ret;
 }
 
 static int atq_issue(struct at_req *req)
 {
-	struct blob_buf b = {};
+	const char *target;
 	int secs, ret;
 
 	if (!at_daemon_ready())
@@ -191,26 +290,68 @@ static int atq_issue(struct at_req *req)
 	/* A request that names its own port wins: that is how the port probe
 	 * talks to a candidate that g_state.port does not describe yet.  Falling
 	 * back to g_state.port is the normal path for everything else. */
-	const char *target = req->port[0] ? req->port : g_state.port;
+	target = req->port[0] ? req->port : g_state.port;
 
-	blob_buf_init(&b, 0);
-	blobmsg_add_string(&b, "at_port", target);
-	blobmsg_add_string(&b, "at_cmd", req->cmd);
-	blobmsg_add_u32(&b, "timeout", secs);
-	if (req->end_flag[0])
-		blobmsg_add_string(&b, "end_flag", req->end_flag);
-
-	ret = ubus_invoke(g_ubus, at_daemon_id, "sendat", b.head,
-			  sendat_cb, req, req->timeout_ms + 2000);
-	blob_buf_free(&b);
-
-	if (ret) {
-		/* Could not even hand it to ubus: treat as timeout. */
-		fm160_log(LOG_WARN, "sendat invoke failed: %s", ubus_strerror(ret));
-		at_daemon_id = 0;
-		return ret;
+	if (!req->payload_hex[0]) {
+		ret = sendat_call(target, "at_cmd", req->cmd, secs,
+				  req->end_flag, sendat_cb, req,
+				  req->timeout_ms + 2000);
+		if (ret) {
+			/* Could not even hand it to ubus: treat as timeout. */
+			fm160_log(LOG_WARN, "sendat invoke failed: %s",
+				  ubus_strerror(ret));
+			at_daemon_id = 0;
+			return ret;
+		}
+		return 0;
 	}
-	return 0;
+
+	/* --- stage 1: the command, up to the prompt ------------------- */
+	{
+		struct stage1 s;
+		int psecs = (ATQ_PROMPT_TIMEOUT_MS + 999) / 1000;
+
+		s.req = req;
+		s.seen = false;
+		s.status = AT_STATUS_TIMEOUT;
+		s.partial[0] = '\0';
+
+		ret = sendat_call(target, "at_cmd", req->cmd, psecs,
+				  req->prompt[0] ? req->prompt : ">",
+				  prompt_cb, &s, ATQ_PROMPT_TIMEOUT_MS + 2000);
+		if (ret) {
+			fm160_log(LOG_WARN, "sendat (prompt) invoke failed: %s",
+				  ubus_strerror(ret));
+			at_daemon_id = 0;
+			atq_finish(req, AT_STATUS_TIMEOUT, NULL);
+			return 0;
+		}
+		if (!s.seen) {
+			fm160_log(LOG_DEBUG, "no prompt for '%s': %s", req->cmd,
+				  s.partial[0] ? s.partial : "no answer");
+			atq_finish(req, s.status,
+				   s.partial[0] ? s.partial : NULL);
+			return 0;
+		}
+
+		/* --- stage 2: the payload, then the real terminal -------
+		 *
+		 * Between these two calls the modem is holding the line open
+		 * waiting for data.  Nothing else in fm160d can run in that
+		 * gap: this function has not returned, so the queue still
+		 * believes the request is in flight. */
+		ret = sendat_call(target, "raw_at_content", req->payload_hex,
+				  secs, req->end_flag, sendat_cb, req,
+				  req->timeout_ms + 2000);
+		if (ret) {
+			fm160_log(LOG_WARN, "sendat (payload) invoke failed: %s",
+				  ubus_strerror(ret));
+			at_daemon_id = 0;
+			atq_finish(req, AT_STATUS_TIMEOUT, NULL);
+			return 0;
+		}
+		return 0;
+	}
 }
 
 static void atq_dispatch(void)
@@ -252,16 +393,9 @@ static void atq_dispatch(void)
 	}
 
 	inflight = best;
-	if (atq_issue(best)) {
+	if (atq_issue(best))
 		/* Could not send: fail it and try the next one. */
-		if (best->cb)
-			best->cb(best, AT_STATUS_TIMEOUT, NULL, best->arg);
-		if (!best->silent)
-			fm160_sched_note_result(false, true);
-		inflight = NULL;
-		free(best);
-		atq_dispatch();
-	}
+		atq_finish(best, AT_STATUS_TIMEOUT, NULL);
 }
 
 static bool atq_duplicate(const struct at_req *want)
@@ -283,7 +417,8 @@ static bool atq_duplicate(const struct at_req *want)
 static int atq_submit_full(enum at_prio prio, const char *cmd,
 			   const char *end_flag, int timeout_ms,
 			   at_done_cb cb, void *arg, bool silent,
-			   const char *override_port)
+			   const char *override_port,
+			   const char *prompt, const char *payload_hex)
 {
 	struct at_req *req;
 
@@ -306,6 +441,18 @@ static int atq_submit_full(enum at_prio prio, const char *cmd,
 	snprintf(req->cmd, sizeof(req->cmd), "%s", cmd);
 	if (end_flag)
 		snprintf(req->end_flag, sizeof(req->end_flag), "%s", end_flag);
+	if (payload_hex && *payload_hex) {
+		/* Refuse rather than truncate: half a PDU is a message the modem
+		 * would accept and send wrong. */
+		if (strlen(payload_hex) >= sizeof(req->payload_hex)) {
+			free(req);
+			return -ENOSPC;
+		}
+		snprintf(req->payload_hex, sizeof(req->payload_hex), "%s",
+			 payload_hex);
+		snprintf(req->prompt, sizeof(req->prompt), "%s",
+			 (prompt && *prompt) ? prompt : ">");
+	}
 	req->prio = prio;
 	req->timeout_ms = timeout_ms > 0 ? timeout_ms : 3000;
 	req->cb = cb;
@@ -349,19 +496,31 @@ int atq_submit(enum at_prio prio, const char *cmd, const char *end_flag,
 	       int timeout_ms, at_done_cb cb, void *arg)
 {
 	return atq_submit_full(prio, cmd, end_flag, timeout_ms, cb, arg,
-			       false, NULL);
+			       false, NULL, NULL, NULL);
+}
+
+int atq_submit_prompt(enum at_prio prio, const char *cmd, const char *prompt,
+		      const char *payload_hex, const char *end_flag,
+		      int timeout_ms, at_done_cb cb, void *arg)
+{
+	/* With no payload this is an ordinary request; going through the
+	 * two-stage path would wait for a prompt nobody is going to send. */
+	if (!payload_hex || !*payload_hex)
+		return atq_submit(prio, cmd, end_flag, timeout_ms, cb, arg);
+	return atq_submit_full(prio, cmd, end_flag, timeout_ms, cb, arg,
+			       false, NULL, prompt, payload_hex);
 }
 
 int atq_submit_silent(enum at_prio prio, const char *cmd, int timeout_ms)
 {
 	return atq_submit_full(prio, cmd, NULL, timeout_ms, NULL, NULL,
-			       true, NULL);
+			       true, NULL, NULL, NULL);
 }
 
 int atq_probe_port(const char *port, at_done_cb cb, void *arg)
 {
 	return atq_submit_full(AT_PRIO_STATE, "AT", NULL, 2000, cb, arg,
-			       true, port);
+			       true, port, NULL, NULL);
 }
 
 int atq_depth(void)

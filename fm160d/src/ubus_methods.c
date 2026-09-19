@@ -73,9 +73,27 @@ static const struct blobmsg_policy celllock_policy[] = {
 	[ATTR_MODE]   = { .name = "mode",   .type = BLOBMSG_TYPE_INT32  },
 	[ATTR_RAT]    = { .name = "rat",    .type = BLOBMSG_TYPE_INT32  },
 	[ATTR_TYPE]   = { .name = "type",   .type = BLOBMSG_TYPE_INT32  },
-	/* earfcn reaches 4294967295 in the capability range, so it cannot
-	 * travel as an int32 without wrapping. */
-	[ATTR_EARFCN] = { .name = "earfcn", .type = BLOBMSG_TYPE_INT64  },
+	/*
+	 * earfcn reaches 4294967295 in the capability range, so it cannot be
+	 * carried as an int32 without wrapping - but the type is deliberately
+	 * left UNSPEC here rather than declared INT64, and that is a fix, not an
+	 * oversight.
+	 *
+	 * libubox parses a JSON number that FITS int32 into an INT32 blob and
+	 * only widens to INT64 above 2^31.  A policy that demands INT64 therefore
+	 * rejects every ordinary earfcn and accepts only the rare giant one - the
+	 * exact inverse of what was intended, and invisible until someone tried
+	 * an ordinary value.  Measured on the device: `ubus call fm160
+	 * sms_delete '{"id":9999}'` answered "Invalid argument" instead of "Not
+	 * found" for precisely this reason.
+	 *
+	 * UNSPEC skips the type check (blobmsg_parse only compares when the
+	 * policy names a type), and blobmsg_get_u64() below reads an INT32, an
+	 * INT64 or a numeric string alike.  The value is validated where it
+	 * belongs: fm160_cmd_set_celllock() and the modem's own AT+GTCELLLOCK=?
+	 * answer.
+	 */
+	[ATTR_EARFCN] = { .name = "earfcn" },
 	[ATTR_PCI]    = { .name = "pci",    .type = BLOBMSG_TYPE_INT32  },
 	[ATTR_SCS]    = { .name = "scs",    .type = BLOBMSG_TYPE_INT32  },
 	[ATTR_NRBAND] = { .name = "nrband", .type = BLOBMSG_TYPE_INT32  },
@@ -551,6 +569,311 @@ static int handle_setgnsscfg(struct ubus_context *ctx, struct ubus_object *obj,
 	return UBUS_STATUS_OK;
 }
 
+/* --- M3: SMS -------------------------------------------------------- */
+
+enum {
+	ATTR_SMS_NUMBER,
+	ATTR_SMS_TEXT,
+	__ATTR_SMS_SEND_MAX
+};
+
+static const struct blobmsg_policy sms_send_policy[] = {
+	[ATTR_SMS_NUMBER] = { .name = "number", .type = BLOBMSG_TYPE_STRING },
+	[ATTR_SMS_TEXT]   = { .name = "text",   .type = BLOBMSG_TYPE_STRING },
+};
+
+enum {
+	ATTR_SMS_ID,
+	__ATTR_SMS_ID_MAX
+};
+
+static const struct blobmsg_policy sms_id_policy[] = {
+	/*
+	 * UNSPEC for the same reason as earfcn above: the id travels as a JSON
+	 * number that always fits int32, so libubox stores it as an INT32 blob,
+	 * and a policy demanding INT64 rejects it.  With INT64 here, both
+	 * sms_delete and sms_markread answered "Invalid argument" to every
+	 * request - including the ones from the LuCI page, whose rpc sends the
+	 * same shape.  Reading with blobmsg_get_u64() accepts either blob.
+	 */
+	[ATTR_SMS_ID] = { .name = "id" },
+};
+
+/*
+ * The message list is deliberately NOT part of the status snapshot: it is up to
+ * a kilobyte of text per message and the snapshot is pushed on every change.
+ * Building it here means it is built when a page is actually looking at it.
+ */
+static int handle_sms_list(struct ubus_context *ctx, struct ubus_object *obj,
+			   struct ubus_request_data *req, const char *method,
+			   struct blob_attr *msg)
+{
+	struct blob_buf b = {};
+	int i, n = fm160_sms_count();
+
+	(void)obj;
+	(void)method;
+	(void)msg;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_u32(&b, "count", (uint32_t)n);
+	{
+		void *a = blobmsg_open_array(&b, "messages");
+
+		for (i = 0; i < n; i++) {
+			const struct fm160_sms_msg *m = fm160_sms_get(i);
+			void *t;
+
+			if (!m)
+				break;
+			t = blobmsg_open_table(&b, NULL);
+			blobmsg_add_u64(&b, "id", m->id);
+			blobmsg_add_u8(&b, "outgoing", m->outgoing);
+			/* -1 means "we have no copy on the modem" - a message
+			 * read here, or one we sent.  Sent as a flag as well so
+			 * the page does not have to know that 4294967295 is
+			 * "no index". */
+			blobmsg_add_u8(&b, "index_known", m->index >= 0);
+			blobmsg_add_u32(&b, "index", (uint32_t)m->index);
+			blobmsg_add_string(&b, "storage", m->storage);
+			blobmsg_add_string(&b, "number", m->number);
+			blobmsg_add_u8(&b, "international", m->international);
+			blobmsg_add_string(&b, "text", m->text);
+			blobmsg_add_u32(&b, "text_len", (uint32_t)m->text_len);
+			blobmsg_add_u32(&b, "encoding", (uint32_t)m->encoding);
+			blobmsg_add_u8(&b, "has_time", m->has_time);
+			if (m->has_time) {
+				blobmsg_add_u32(&b, "year", (uint32_t)m->year);
+				blobmsg_add_u32(&b, "month", (uint32_t)m->month);
+				blobmsg_add_u32(&b, "day", (uint32_t)m->day);
+				blobmsg_add_u32(&b, "hour", (uint32_t)m->hour);
+				blobmsg_add_u32(&b, "min", (uint32_t)m->min);
+				blobmsg_add_u32(&b, "sec", (uint32_t)m->sec);
+				blobmsg_add_u32(&b, "tz_quarters",
+						(uint32_t)m->tz_quarters);
+				blobmsg_add_u8(&b, "tz_negative", m->tz_negative);
+			}
+			if (m->concat) {
+				blobmsg_add_u8(&b, "concat", 1);
+				blobmsg_add_u32(&b, "ref", (uint32_t)m->ref);
+				blobmsg_add_u32(&b, "parts", (uint32_t)m->parts);
+				blobmsg_add_u32(&b, "part", (uint32_t)m->part);
+			}
+			blobmsg_add_u32(&b, "status", (uint32_t)m->status);
+			blobmsg_add_u64(&b, "age_ms", fm160_now_ms() - m->local_ms);
+			blobmsg_close_table(&b, t);
+		}
+		blobmsg_close_array(&b, a);
+	}
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return UBUS_STATUS_OK;
+}
+
+static int handle_sms_send(struct ubus_context *ctx, struct ubus_object *obj,
+			   struct ubus_request_data *req, const char *method,
+			   struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_SMS_SEND_MAX];
+	struct pending_at *p;
+	const char *number, *text;
+	int rc;
+
+	(void)obj;
+	(void)method;
+
+	blobmsg_parse(sms_send_policy, __ATTR_SMS_SEND_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_SMS_NUMBER] || !tb[ATTR_SMS_TEXT])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	number = blobmsg_get_string(tb[ATTR_SMS_NUMBER]);
+	text = blobmsg_get_string(tb[ATTR_SMS_TEXT]);
+	if (!number[0] || !text[0])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	if (strlen(text) >= FM160_SMS_TEXT_MAX)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	if (!g_state.port_found)
+		return UBUS_STATUS_NOT_FOUND;
+	if (g_state.at_state == 2)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	/* The whole feature is gated on the modem having accepted PDU mode, a
+	 * storage and the new-message indication.  Offering the button before
+	 * that just queues a command the modem has already refused once. */
+	if (!fm160_sms_usable()) {
+		fm160_log(LOG_WARNING,
+			  "sms send refused: the modem has not accepted the sms setup");
+		return UBUS_STATUS_NOT_SUPPORTED;
+	}
+
+	p = pending_begin(ctx, req);
+	if (!p)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	rc = fm160_cmd_sms_send(number, text, manual_at_cb, p);
+	if (rc)
+		return pending_abort(ctx, p, UBUS_STATUS_INVALID_ARGUMENT);
+	return UBUS_STATUS_OK;
+}
+
+/*
+ * Deleting a message is two operations, and while they are not equally urgent
+ * they both have to be attempted:
+ *
+ *   the modem's copy  AT+CMGD=<index>.  This is the one that matters for the
+ *                     device working tomorrow: the modem's store is what fills
+ *                     up, and a full store is what stops new messages arriving.
+ *                     A message dropped only from this daemon's list would go on
+ *                     occupying its slot forever.
+ *   our copy          the list entry, ALWAYS, including when the modem refused.
+ *                     A page that keeps showing a message the user has just
+ *                     deleted reads as a broken page.
+ *
+ * So the local delete runs regardless, and the reply reports the two separately
+ * rather than folding them into one boolean.  A refusal on the modem (no card,
+ * or the message is already gone from its store) is then visible for what it is
+ * instead of being reported as "the delete failed" when the entry did vanish.
+ */
+struct sms_delete_ctx {
+	struct pending_at *p;
+	uint64_t id;
+};
+
+static void sms_delete_reply(struct sms_delete_ctx *d, enum at_status st,
+			     const char *resp, bool tried_modem)
+{
+	struct blob_buf b = {};
+	int local_ok = fm160_sms_delete_local(d->id) == 0;
+
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "status", at_status_name(st));
+	blobmsg_add_u8(&b, "modem_tried", tried_modem);
+	blobmsg_add_u8(&b, "modem_deleted", tried_modem && st == AT_STATUS_OK);
+	blobmsg_add_u8(&b, "local_deleted", local_ok);
+	blobmsg_add_string(&b, "response", resp ? resp : "");
+	ubus_send_reply(d->p->ctx, &d->p->req, b.head);
+	blob_buf_free(&b);
+
+	ubus_complete_deferred_request(d->p->ctx, &d->p->req, UBUS_STATUS_OK);
+	fm160_sched_report_foreground();
+	free(d->p);
+	free(d);
+}
+
+static void sms_delete_cb(struct at_req *r, enum at_status st,
+			  const char *resp, void *arg)
+{
+	(void)r;
+	sms_delete_reply(arg, st, resp, true);
+}
+
+static int handle_sms_delete(struct ubus_context *ctx, struct ubus_object *obj,
+			     struct ubus_request_data *req, const char *method,
+			     struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_SMS_ID_MAX];
+	struct sms_delete_ctx *d;
+	const struct fm160_sms_msg *m;
+	uint64_t id;
+
+	(void)obj;
+	(void)method;
+
+	blobmsg_parse(sms_id_policy, __ATTR_SMS_ID_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_SMS_ID])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	id = blobmsg_get_u64(tb[ATTR_SMS_ID]);
+
+	m = fm160_sms_find(id);
+	if (!m)
+		return UBUS_STATUS_NOT_FOUND;
+
+	d = calloc(1, sizeof(*d));
+	if (!d)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	d->id = id;
+	d->p = pending_begin(ctx, req);
+	if (!d->p) {
+		free(d);
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
+
+	/*
+	 * The modem is asked only when it actually holds a copy and the feature
+	 * is usable.  A message whose index is -1 was read from the modem and
+	 * kept after the modem forgot it, so there is nothing there to remove;
+	 * a modem that never accepted the setup has no storage to remove from.
+	 * Both are still deletions the user asked for, so both carry on to the
+	 * local delete - they just have no AT exchange in front of it.
+	 */
+	if (m->index < 0 || !fm160_sms_usable()) {
+		sms_delete_reply(d, AT_STATUS_OK, "", false);
+		return UBUS_STATUS_OK;
+	}
+
+	if (fm160_cmd_sms_delete(m->index, sms_delete_cb, d)) {
+		int ret = pending_abort(ctx, d->p, UBUS_STATUS_UNKNOWN_ERROR);
+
+		free(d);
+		return ret;
+	}
+	return UBUS_STATUS_OK;
+}
+
+static int handle_sms_markread(struct ubus_context *ctx, struct ubus_object *obj,
+			       struct ubus_request_data *req, const char *method,
+			       struct blob_attr *msg)
+{
+	struct blob_attr *tb[__ATTR_SMS_ID_MAX];
+
+	(void)obj;
+	(void)method;
+
+	blobmsg_parse(sms_id_policy, __ATTR_SMS_ID_MAX, tb,
+		      msg ? blob_data(msg) : NULL, msg ? blob_len(msg) : 0);
+	if (!tb[ATTR_SMS_ID])
+		return UBUS_STATUS_INVALID_ARGUMENT;
+	if (fm160_sms_mark_read(blobmsg_get_u64(tb[ATTR_SMS_ID])))
+		return UBUS_STATUS_NOT_FOUND;
+	return UBUS_STATUS_OK;
+}
+
+/*
+ * Ask the modem what it is holding.  This is the only SMS operation a button
+ * starts directly, and it is the one that also retries the setup - a human
+ * asking for messages is exactly the moment worth trying again.
+ */
+static int handle_sms_sync(struct ubus_context *ctx, struct ubus_object *obj,
+			   struct ubus_request_data *req, const char *method,
+			   struct blob_attr *msg)
+{
+	struct blob_buf b = {};
+	int rc;
+
+	(void)obj;
+	(void)method;
+	(void)msg;
+
+	if (!g_state.port_found)
+		return UBUS_STATUS_NOT_FOUND;
+	if (g_state.at_state == 2)
+		return UBUS_STATUS_UNKNOWN_ERROR;
+
+	rc = fm160_cmd_sms_sync();
+	blob_buf_init(&b, 0);
+	blobmsg_add_string(&b, "result",
+			   rc == 0 ? "started" :
+			   rc == -EBUSY ? "busy" :
+			   rc == -EAGAIN ? "not-ready" : "error");
+	blobmsg_add_u8(&b, "usable", fm160_sms_usable());
+	blobmsg_add_string(&b, "storage", g_state.sms.st.mem);
+	blobmsg_add_string(&b, "detail", g_state.sms.st.last_error_text);
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return UBUS_STATUS_OK;
+}
+
 static const struct ubus_method fm160_methods[] = {
 	UBUS_METHOD_NOARG("status",   handle_status),
 	UBUS_METHOD("profile",   handle_profile,   profile_policy),
@@ -567,6 +890,13 @@ static const struct ubus_method fm160_methods[] = {
 	 * object that is not stored by the module. */
 	UBUS_METHOD("setgnss",      handle_setgnss,      gnss_policy),
 	UBUS_METHOD("setgnsscfg",   handle_setgnsscfg,   constellation_policy),
+	/* M3.  "sms_send" is the only deferred one: the rest answer from our
+	 * own list and never touch the modem. */
+	UBUS_METHOD_NOARG("sms_list",   handle_sms_list),
+	UBUS_METHOD("sms_send",     handle_sms_send,     sms_send_policy),
+	UBUS_METHOD("sms_delete",   handle_sms_delete,   sms_id_policy),
+	UBUS_METHOD("sms_markread", handle_sms_markread, sms_id_policy),
+	UBUS_METHOD_NOARG("sms_sync",   handle_sms_sync),
 };
 
 static struct ubus_object_type fm160_obj_type =

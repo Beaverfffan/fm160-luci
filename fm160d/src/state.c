@@ -765,6 +765,64 @@ struct blob_buf *fm160_state_blob(void)
 		blobmsg_close_table(&b, g);
 	}
 
+	/* --- M3: SMS -------------------------------------------------- */
+	/*
+	 * Only the status is published here, never the messages themselves.  A
+	 * list of 64 messages each carrying up to a kilobyte of text would be
+	 * re-serialised on every snapshot push to answer a question nobody is
+	 * asking; the page that wants them calls "fm160.sms_list", which builds
+	 * the list once, on demand, and can say how many it is sending.
+	 */
+	{
+		const struct fm160_sms_status *s = &g_state.sms.st;
+		void *t, *u;
+
+		t = blobmsg_open_table(&b, "sms");
+		blobmsg_add_u8(&b, "probed", s->probed);
+		blobmsg_add_u8(&b, "usable", s->usable);
+		blobmsg_add_u8(&b, "setup_done", g_state.sms.setup_done);
+		/* -1 means "never read".  Sent as a flag as well, because
+		 * blobmsg has no signed integer and 4294967295 on its own reads
+		 * like a nonsense mode rather than a missing answer. */
+		blobmsg_add_u8(&b, "cmgf_known", g_state.sms.cmgf >= 0);
+		blobmsg_add_u32(&b, "cmgf", (uint32_t)g_state.sms.cmgf);
+		blobmsg_add_string(&b, "storage", s->mem);
+		blobmsg_add_u32(&b, "used", (uint32_t)s->used);
+		blobmsg_add_u32(&b, "total", (uint32_t)s->total);
+		blobmsg_add_u32(&b, "kept", (uint32_t)g_state.sms.count);
+		blobmsg_add_u32(&b, "unread", (uint32_t)s->unread);
+		blobmsg_add_u32(&b, "received", (uint32_t)s->received);
+		blobmsg_add_u32(&b, "duplicates", (uint32_t)s->duplicates);
+		blobmsg_add_u32(&b, "last_error", (uint32_t)s->last_error);
+		blobmsg_add_string(&b, "last_error_text", s->last_error_text);
+		blobmsg_add_u8(&b, "busy", g_state.sms.busy);
+		if (s->last_ok_ms)
+			blobmsg_add_u64(&b, "age_ms",
+					fm160_now_ms() - s->last_ok_ms);
+
+		/* The zero-length-packet evidence (PLAN §4).  A long PDU that
+		 * times out is the symptom; these are the counts that decide
+		 * whether a kernel workaround is warranted. */
+		u = blobmsg_open_table(&b, "counters");
+		blobmsg_add_u32(&b, "sent_ok", (uint32_t)s->sent_ok);
+		blobmsg_add_u32(&b, "sent_fail", (uint32_t)s->sent_fail);
+		blobmsg_add_u32(&b, "sent_timeout", (uint32_t)s->sent_timeout);
+		blobmsg_add_u32(&b, "long_sent", (uint32_t)s->long_sent);
+		blobmsg_add_u32(&b, "long_timeout", (uint32_t)s->long_timeout);
+		blobmsg_close_table(&b, u);
+
+		u = blobmsg_open_table(&b, "last_send");
+		blobmsg_add_string(&b, "command", g_state.sms.last_send_cmd);
+		blobmsg_add_u32(&b, "segments",
+				(uint32_t)g_state.sms.last_segments);
+		blobmsg_add_u32(&b, "pdu_chars",
+				(uint32_t)strlen(g_state.sms.last_pdu));
+		blobmsg_add_u32(&b, "mr", (uint32_t)g_state.sms.sent_mr);
+		blobmsg_close_table(&b, u);
+
+		blobmsg_close_table(&b, t);
+	}
+
 	/* --- traffic -------------------------------------------------- */
 	{
 		void *t = blobmsg_open_table(&b, "traffic");

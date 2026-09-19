@@ -618,6 +618,16 @@ static void housekeeping(struct uloop_timeout *t)
 	port_discovery_tick();
 	fm160_netdev_poll();
 
+	/*
+	 * SMS has no poll tier - AT+CPMS? was measured at 10.3 s with no card on
+	 * a port where AT+CSQ takes 24 ms, and one such row would starve every
+	 * command behind it.  What it does have is a one-time setup, and this is
+	 * the only clock it needs: it submits nothing once the setup has
+	 * succeeded, and nothing at all after it has been refused its allowed
+	 * number of times.
+	 */
+	fm160_sms_setup_tick();
+
 	if (now < poll_suspend_until_ms)
 		return;
 	if (g_state.at_state == 2)

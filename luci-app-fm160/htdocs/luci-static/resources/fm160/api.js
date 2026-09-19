@@ -49,6 +49,27 @@ var callSetGnssCfg = rpc.declare({ object: 'fm160', method: 'setgnsscfg',
 				   params: [ 'constellation' ], expect: {} });
 
 /*
+ * SMS.
+ *
+ * Only the send and the sync touch the modem.  Everything else - the list, the
+ * deleting, the marking as read - is answered from fm160d's own copy, so
+ * opening the page costs no AT traffic at all.
+ *
+ * "sms_sync" is a button rather than something that happens on a timer, and
+ * that is the whole design: AT+CPMS? took 10.3 s on this modem with no card
+ * fitted, against 24 ms for AT+CSQ.  A page that polled it would keep the one
+ * serial port busy asking a question whose answer has not changed.
+ */
+var callSmsList   = rpc.declare({ object: 'fm160', method: 'sms_list',     expect: {} });
+var callSmsSend   = rpc.declare({ object: 'fm160', method: 'sms_send',
+				  params: [ 'number', 'text' ], expect: {} });
+var callSmsDelete = rpc.declare({ object: 'fm160', method: 'sms_delete',
+				  params: [ 'id' ], expect: {} });
+var callSmsRead   = rpc.declare({ object: 'fm160', method: 'sms_markread',
+				  params: [ 'id' ], expect: {} });
+var callSmsSync   = rpc.declare({ object: 'fm160', method: 'sms_sync',     expect: {} });
+
+/*
  * USB profiles.
  *
  * The dial-up document carries FOUR port tables, one per platform, and the same
@@ -886,6 +907,126 @@ var GNSS_EPO_TEXT = { 0: _('off'), 1: 'MSB', 2: 'MSA' };
 
 function gnssEpoName(v) { return GNSS_EPO_TEXT[v] || ('EPO ' + v); }
 
+/*
+ * --- SMS ---------------------------------------------------------------
+ *
+ * smsOf() returns the section of the snapshot.  `usable` in it is the licence
+ * for the whole feature: it means the modem accepted PDU mode, a storage, and
+ * the new-message indication.  A page that offers to send while usable is false
+ * is offering a command the daemon will refuse and the modem has already
+ * refused once - so the page asks first.
+ */
+function smsOf(st) { return (st && st.sms) || {}; }
+
+function smsUsable(st) { return !!smsOf(st).usable; }
+
+function smsStorageOf(st) {
+	var s = smsOf(st);
+
+	return {
+		name: s.storage || '',
+		used: reported(s.used) ? s.used : null,
+		total: reported(s.total) ? s.total : null,
+		probed: !!s.probed
+	};
+}
+
+function smsCounterOf(st, key) {
+	var c = smsOf(st).counters || {};
+
+	return reported(c[key]) ? c[key] : null;
+}
+
+/*
+ * A message's time stamp, exactly as the SMSC wrote it.
+ *
+ * Deliberately NOT converted into the router's clock.  A message the network
+ * stamped 09:31 was sent at 09:31; rendering it as something else because the
+ * router keeps a different time zone would be inventing a fact, and the offset
+ * the stamp arrived with is shown next to it so the reader can do the sum if
+ * they want to.  The year is two digits because that is all a PDU carries -
+ * padding it out to four would be a guess about the century.
+ */
+function smsTimestamp(m) {
+	function p(n) { return (n < 10 ? '0' : '') + n; }
+	var mins, sign;
+
+	if (!m || !m.has_time)
+		return null;
+	mins = (m.tz_quarters || 0) * 15;
+	sign = m.tz_negative ? '-' : '+';
+	return {
+		text: p(m.year) + '-' + p(m.month) + '-' + p(m.day) + ' ' +
+		      p(m.hour) + ':' + p(m.min) + ':' + p(m.sec),
+		zone: 'UTC' + sign + Math.floor(mins / 60) +
+		      (mins % 60 ? ':' + p(mins % 60) : '')
+	};
+}
+
+function smsAgeText(m) {
+	if (!m || !reported(m.age_ms))
+		return '';
+	if (m.age_ms < 60000)
+		return Math.round(m.age_ms / 1000) + 's';
+	if (m.age_ms < 3600000)
+		return Math.round(m.age_ms / 60000) + 'm';
+	return Math.round(m.age_ms / 3600000) + 'h';
+}
+
+var SMS_ENCODING_TEXT = { 0: 'GSM 7-bit', 1: 'UCS2', 2: '8-bit' };
+
+function smsEncodingName(v) { return SMS_ENCODING_TEXT[v] || _('unknown'); }
+
+/* "2 of 3" for a message that arrived in pieces, empty otherwise. */
+function smsPartsText(m) {
+	if (!m || !m.concat || !m.parts)
+		return '';
+	return m.part + ' / ' + m.parts;
+}
+
+/*
+ * How much of the send budget a message used, as a sentence the page can show
+ * before the user presses send.  Mirrors sms_pdu_plan() in pdu.c: 160 septets
+ * or 70 characters in one piece, 153 or 67 in each piece after that.
+ */
+function smsEstimate(text, maxParts) {
+	var i, chars = 0, septets = 0, gsm7 = true, n;
+	var ext = '^{}\\[\\]~|';
+
+	if (!text)
+		return { chars: 0, septets: 0, parts: 0, encoding: _('empty') };
+
+	for (i = 0; i < text.length; i++) {
+		var c = text.charCodeAt(i);
+
+		chars++;
+		if (c > 0x7F) {
+			/* Anything outside ASCII lands outside the GSM alphabet
+			 * as far as this estimate is concerned.  The real answer
+			 * comes from the daemon; this is a preview. */
+			gsm7 = false;
+			continue;
+		}
+		septets += ext.indexOf(text.charAt(i)) >= 0 ? 2 : 1;
+	}
+	if (!gsm7)
+		septets = 0;
+
+	n = gsm7
+		? (septets <= 160 ? 1 : Math.ceil(septets / 153))
+		: (chars <= 70 ? 1 : Math.ceil(chars / 67));
+	if (maxParts && n > maxParts)
+		n = maxParts + 1;      /* "more than we will send" */
+
+	return {
+		chars: chars,
+		septets: septets,
+		parts: n,
+		encoding: gsm7 ? 'GSM 7-bit' : 'UCS2',
+		gsm7: gsm7
+	};
+}
+
 return baseclass.extend({
 	USB_MODES: USB_MODES,
 	USB_PLATFORM: USB_PLATFORM,
@@ -907,6 +1048,12 @@ return baseclass.extend({
 	setCellLock: callSetCellLock,
 	setGnss: callSetGnss,
 	setGnssCfg: callSetGnssCfg,
+	/* M3 */
+	smsList: callSmsList,
+	smsSend: callSmsSend,
+	smsDelete: callSmsDelete,
+	smsMarkRead: callSmsRead,
+	smsSync: callSmsSync,
 
 	ratName: ratName,
 	regName: regName,
@@ -1006,6 +1153,16 @@ return baseclass.extend({
 	gnssAltM: gnssAltM,
 	gnssSpeedKmh: gnssSpeedKmh,
 	gnssEpoName: gnssEpoName,
+	/* M3 */
+	smsOf: smsOf,
+	smsUsable: smsUsable,
+	smsStorageOf: smsStorageOf,
+	smsCounterOf: smsCounterOf,
+	smsTimestamp: smsTimestamp,
+	smsAgeText: smsAgeText,
+	smsEncodingName: smsEncodingName,
+	smsPartsText: smsPartsText,
+	smsEstimate: smsEstimate,
 
 	/*
 	 * Modes that may be offered for a given dial kind.

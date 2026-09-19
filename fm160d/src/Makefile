@@ -8,7 +8,7 @@ CFLAGS  ?= -O2 -g -Wall
 LDFLAGS ?=
 
 BIN      = fm160d
-OBJS     = atq.o cmds.o main.o sched.o state.o ubus_methods.o
+OBJS     = atq.o cmds.o main.o pdu.o sched.o sms.o state.o ubus_methods.o
 LIBS     = -lubus -lubox -lblobmsg_json
 
 all: $(BIN)
@@ -21,6 +21,11 @@ $(BIN): $(OBJS)
 
 %.o: %.c fm160d.h
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# pdu.c is the one source that deliberately does not include fm160d.h - it is
+# pure transformation with no modem and no ubus, which is what lets the
+# host-side test compile it on its own (23-sms-pdu-test.sh).
+pdu.o: pdu.c pdu.h
 
 clean:
 	rm -f $(OBJS) $(BIN)

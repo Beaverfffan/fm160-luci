@@ -189,17 +189,15 @@ static void handle_urc_line(const char *line)
 		}
 		return;
 	}
-	if (!strncmp(line, "+CMTI", 5)) {
-		/* New SMS stored on the modem.  The fetch itself belongs to the
-		 * SMS milestone; for now record the event so that consumers can
-		 * see the transport is delivering URCs. */
-		fm160_log(LOG_INFO, "URC +CMTI: %s", line);
-		fm160_state_mark_dirty();
-		return;
-	}
-	if (!strncmp(line, "+CDS", 4)) {
-		fm160_log(LOG_INFO, "URC +CDS (delivery report)");
-		return;
+	if (!strncmp(line, "+CMTI", 5) || !strncmp(line, "+CMT", 4) ||
+	    !strncmp(line, "+CDS", 4) || !strncmp(line, "+CMS ERROR", 10) ||
+	    !strncmp(line, "+CME ERROR", 10)) {
+		/* SMS owns its own unsolicited results.  It gets first refusal
+		 * here so that the fetch a +CMTI triggers is scheduled by the
+		 * event itself, rather than by a note taken here plus a hook
+		 * elsewhere that has to agree with it. */
+		if (fm160_sms_handle_urc(line))
+			return;
 	}
 	fm160_log(LOG_DEBUG, "URC: %s", line);
 }
@@ -312,6 +310,7 @@ int main(int argc, char **argv)
 
 	fm160_state_init();
 	fm160_config_load();
+	fm160_sms_init();
 
 	if (setup_ubus()) {
 		uloop_done();

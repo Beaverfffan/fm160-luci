@@ -15,7 +15,7 @@
 |---|---|---|
 | **M1** | AT 内核：端口发现、单属主队列、URC 事件、分级调度、静默窗、熔断、状态缓存、ubus 接口；身份/注网/信号/小区解析；LuCI 概览·信号·AT 调试三页 | ✅ **已完成** |
 | M2 | 拨号（QMI/MBIM 原生 proto + ECM 自定义 proto）、重连阶梯、USB 模式白名单与切换回滚状态机 | ⏳ 待做 |
-| M3 | 短信（PDU 编解码、收发、存储、长短信）+ `at-daemon` 的 `sendat` prompt 补丁 | ⏳ 待做 |
+| M3 | 短信（PDU 编解码、收发、存储、长短信）。**原计划的 `sendat` prompt 补丁已判定不需要**，改为在 `atq.c` 内做两阶段事务 | ⚠️ **代码完成 + 主机侧自测通过 + 已装机验收，但真机收发不可验**：自测 104 checks / 0 fail，设备侧 `DEVICE VERIFY OK`；本机无 SIM，`AT+CMGS`/`AT+CMGL` 整条收发路径产生不出成功形态，只验到「无卡时优雅降级」。见 `docs/AT-FACTS.md` §12 |
 | **M4** | 频段锁定 / 小区锁定 / 邻区 | ✅ **已完成并在真机验收**（band lock 写路径已验通；cell lock 只写不生效，因为没有传统复位模式，UI 如实说明） |
 | **M5** | GNSS | ✅ **已完成并在真机验收**（`DEVICE VERIFY OK`；解析器主机侧自测 239 checks / 0 fail）。开引擎对连接性影响实测为 0；NMEA 走 AT 口，读路径已在真机跑过真实帧（8 句 / 184 B / 5 talker / 0 校验错）。本机有天线但室内恒 0 颗星，故「有定位」形态仍由独立校验和帧代偿。见 `docs/AT-FACTS.md` §11（§11.11 = 真机联调） |
 | M6 | i18n、日志导出、CI | ⏳ 待做 |
@@ -39,15 +39,17 @@ fm160-luci/
 │   ├── src/
 │   │   ├── fm160d.h        类型与接口
 │   │   ├── main.c          ubus 连接、事件订阅、配置、生命周期
-│   │   ├── atq.c           AT 优先级队列 + sendat 异步客户端 + 响应解析工具
+│   │   ├── atq.c           AT 优先级队列 + sendat 异步客户端 + 两阶段事务（prompt → payload）
 │   │   ├── sched.c         分级轮询 / 抖动 / 退避 / 静默窗 / 熔断 / 端口发现
 │   │   ├── state.c         状态快照 + sysfs 流量计数 + ubus 推送
-│   │   ├── cmds.c          FM160 命令与解析（身份 / 注网 / 信号 / 小区）
+│   │   ├── cmds.c          FM160 命令与解析（身份 / 注网 / 信号 / 小区 / GNSS+NMEA）
+│   │   ├── pdu.c / pdu.h   SMS PDU 编解码（GSM7 / UCS2 / UDH 拼接）— 只依赖 libc，可单独主机侧测试
+│   │   ├── sms.c           SMS（M3）：存储、去重、持久化、setup 状态机、收发、解析器
 │   │   └── ubus_methods.c  ubus 对象 "fm160"
 │   └── files/etc/          init.d / config / hotplug.d / uci-defaults
 └── luci-app-fm160/     表现层：本项目原创（LuCI JavaScript）
     ├── htdocs/luci-static/resources/fm160/api.js
-    ├── htdocs/luci-static/resources/view/fm160/{overview,signal,debug}.js
+    ├── htdocs/luci-static/resources/view/fm160/{overview,signal,cells,gnss,sms,debug}.js
     └── root/usr/share/{luci/menu.d,rpcd/acl.d}/luci-app-fm160.json
 ```
 
@@ -211,10 +213,19 @@ ubus call fm160 at '{"cmd":"AT+GTUSBMODE=?"}'
 ubus call fm160 status | jsonfilter -e '@.port' -e '@.at_state' -e '@.usbmode'
 logread -e fm160d | tail -40
 
-# 4. 短信长 PDU 是否稳定（判断要不要 ZLP 内核补丁）
-ubus call fm160 at '{"cmd":"AT+CMGW=60"}'      # 观察是否超时挂住
+# 4. 短信：先看 setup 有没有被模组接受（无卡时这一步就会失败，属正常）
+ubus call fm160 status | jsonfilter -e '@.sms'
 
-# 5. 拨号激活到底用哪条命令（M2 需要）
+#    列举一次模组存了什么。★ 这是**按钮语义**，不要放进任何循环：
+#    无卡时 AT+CPMS? 要 10.3 秒才回 ERROR，会把串口上的其它轮询全部饿死。
+ubus call fm160 sms_sync
+ubus call fm160 sms_list
+
+# 5. 长 PDU 是否稳定（判断要不要 ZLP 内核补丁）—— 看这两个数，不是看总失败率。
+#    long_timeout 非零才是「多段发送在这颗内核上真的会挂」的证据。
+ubus call fm160 status | jsonfilter -e '@.sms.counters'
+
+# 6. 拨号激活到底用哪条命令（M2 需要）
 ubus call fm160 at '{"cmd":"AT+GTWWAN=?"}'
 ubus call fm160 at '{"cmd":"AT+GTRNDIS=?"}'
 ```
@@ -232,6 +243,7 @@ ubus call fm160 at '{"cmd":"AT+GTRNDIS=?"}'
 | URC | 事件驱动（`qmodem.at.urc` / `qmodem.at.line`），按 `correlation` 区分命令响应与真 URC；`drop_count` 监测丢行 |
 | 模式切换 | 真机 `AT+GTUSBMODE=?` = **{17,18,20,21,24,29,30,31,32,33}**（真机实测，非手册推演）；硬黑名单 20/24/31——无 AT 口、切进去回不来，且真机**确实**支持这三个，属真·单向门；候选 QMI{32,17} MBIM{30,29} ECM{33,18}；写入前后回滚状态机（M2） |
 | 信号显示 | 主数据源 `AT+GTCCINFO?`——一条命令拿到服务小区 + 最多 10 邻区。⚠️ 它是**多行带文本标签**、且 `tac/cellid/earfcn/pci` 是**十六进制**，按 CSV 十进制解析会在真机上静默返回空 |
+| 短信（M3） | **绝不进轮询表**：无卡时 `AT+CPMS?` 10 345 ms、`AT+CMGF?` 5 373 ms，而 `AT+CSQ` 只要 24 ms；串口是串行的 ⇒ 一条慢命令饿死后面全部。只由**按钮 + `+CMTI` 事件**驱动，LuCI 短信页因此是本项目唯一不 `poll.add()` 的页面。发送是**两阶段**（`end_flag:">"` → `raw_at_content: PDU+0x1A`），两阶段在**同一个队列项内**完成以防轮询插入。删除**同时**动模组（`AT+CMGD`）与本地两份副本，且墓碑要落盘，否则重启复活 |
 
 ---
 

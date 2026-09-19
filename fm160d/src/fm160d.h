@@ -25,6 +25,8 @@
 #include <libubox/utils.h>
 #include <libubus.h>
 
+#include "pdu.h"
+
 #define FM160_VENDOR_ID     "2cb7"   /* Fibocom */
 #define FM160_PORT_MAX      64
 #define FM160_STR_MAX       96
@@ -35,6 +37,10 @@
 #define FM160_RESP_LINE_MAX 512
 #define FM160_AT_CMD_MAX    256
 #define FM160_AT_END_MAX    32
+/* Largest two-stage payload, in hex characters.  One SMS PDU is up to
+ * SMS_PDU_HEX_MAX ASCII characters (pdu.h) and each is written as two hex
+ * digits, plus the 0x1A that ends AT+CMGS. */
+#define FM160_AT_PAYLOAD_MAX 1088
 #define FM160_RAW_MAX       8192
 #define FM160_CAND_MAX      12
 
@@ -71,6 +77,27 @@ struct at_req {
 	char end_flag[FM160_AT_END_MAX];
 	int timeout_ms;          /* sendat timeout, seconds internally */
 	bool silent;             /* do not advance the circuit breaker */
+	/*
+	 * Two-stage transactions: AT+CMGS and AT+CMGW.
+	 *
+	 * "AT+CMGS=<n>" is answered with a prompt and NO line terminator, after
+	 * which the modem sits waiting for the PDU.  A single sendat cannot
+	 * express that, so when payload_hex is set the request is sent as two
+	 * sendat calls - the first waiting for `prompt`, the second writing the
+	 * bytes and waiting for the real terminal.
+	 *
+	 * Both calls happen inside ONE queue entry, and that is the whole point:
+	 * the one-request-in-flight rule is what stops a background poll from
+	 * being slipped in between the prompt and the payload.  A poll landing
+	 * there would look to the modem like the answer to its prompt, and the
+	 * message would be quietly garbled.
+	 *
+	 * No change to at-daemon is needed for this: its "raw_at_content" field
+	 * already means "these hex bytes, written verbatim, no CR appended", and
+	 * it still waits for the end flag (see HARDWARE-PROBE.md 10.1).
+	 */
+	char prompt[FM160_AT_END_MAX];       /* stage-1 terminator, normally ">" */
+	char payload_hex[FM160_AT_PAYLOAD_MAX];   /* stage-2 bytes, hex encoded */
 	/* Which port this request goes out on.  Empty means "the port the daemon
 	 * has settled on", i.e. g_state.port.  A port probe fills it in instead:
 	 * the probe is the thing that DISCOVERS g_state.port, so it cannot be
@@ -497,6 +524,104 @@ struct fm160_gnss_state {
 	bool autostart_done;
 };
 
+/* ------------------------------------------------------------------ */
+/* M3: SMS                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Everything SMS-related is event-driven or user-driven.  Nothing in this
+ * subsystem is polled, and that is a measurement rather than a style choice:
+ *
+ *   AT+CPMS?  10 345 ms   ERROR          (no SIM fitted)
+ *   AT+CMGF?   5 373 ms   +CME ERROR: 10
+ *
+ * on a serial port that answers AT+CSQ in 24 ms.  A poll tier containing either
+ * of them would starve every other command queued behind it, so the SMS layer
+ * is entered only when a page asks for something or when the modem announces a
+ * message of its own accord (+CMTI).
+ */
+
+#define FM160_SMS_TEXT_MAX   SMS_PDU_TEXT_MAX
+#define FM160_SMS_NUM_MAX    (SMS_PDU_ADDR_MAX + 1)
+#define FM160_SMS_SEG_MAX    SMS_PDU_SEG_MAX
+/* Messages kept in RAM, newest wins.  While a card is fitted the modem's own
+ * store is the durable copy; this exists so the page has something to show
+ * without a round trip, and so a message already read survives the modem
+ * forgetting it (which it does when its store fills). */
+#define FM160_SMS_KEEP       64
+
+struct fm160_sms_msg {
+	bool used;
+	uint64_t id;                   /* local, monotonic, never reused */
+	bool outgoing;
+	/* Where it lives on the modem; -1 when we hold the only copy. */
+	int  index;
+	char storage[8];
+	char number[FM160_SMS_NUM_MAX];
+	bool international;
+	char text[FM160_SMS_TEXT_MAX];
+	int  text_len;                 /* characters, not bytes */
+	int  encoding;                 /* enum sms_enc */
+	bool has_time;                 /* an SMS-DELIVER is stamped by the SMSC */
+	int  year, month, day, hour, min, sec, tz_quarters;
+	bool tz_negative;
+	bool concat;
+	int  ref, parts, part;
+	int  status;                   /* outgoing: 0 unknown, 2 sent, 3 failed */
+	uint64_t local_ms;             /* when this copy was made */
+};
+
+/*
+ * What the page needs before it offers to send anything.
+ *
+ * `usable` is the licence for the whole feature: AT+CMGF=0 was accepted, a
+ * storage was chosen from what AT+CPMS=? reported, and the new-message
+ * indication was armed.  Until all three hold the page greys out, rather than
+ * offering a button whose command the modem has already refused.
+ */
+struct fm160_sms_status {
+	bool probed;
+	bool usable;
+	char mem[8];                   /* the storage actually in use */
+	int  used, total;              /* as reported by AT+CPMS? */
+	int  kept;                     /* messages in our own list */
+	int  unread;
+	int  received;                 /* pulled from the modem since boot */
+	int  duplicates;               /* dropped because we already had it */
+	int  last_error;               /* +CMS ERROR code, 0 = none */
+	char last_error_text[FM160_STR_MAX];
+	uint64_t last_ok_ms;
+
+	/* --- the evidence PLAN §4 asks for ---------------------------- */
+	/* A PDU longer than one USB packet that times out is the symptom of a
+	 * missing zero-length-packet workaround.  Counted rather than assumed:
+	 * we do not patch a kernel on a hunch. */
+	int  sent_ok, sent_fail, sent_timeout;
+	int  long_sent, long_timeout;
+};
+
+struct fm160_sms_state {
+	struct fm160_sms_status st;
+	struct fm160_sms_msg msg[FM160_SMS_KEEP];
+	int  head;                     /* next slot to overwrite */
+	int  count;
+	uint64_t next_id;
+
+	int  cmgf;                     /* -1 unknown, 0 PDU mode, 1 text mode */
+	bool setup_done;
+	bool setup_running;
+	uint64_t setup_next_ms;        /* backoff after a refused setup */
+
+	int  sent_mr;                  /* the +CMGS reference, when reported */
+	/* The exact bytes the last send put on the wire.  Kept for the page and
+	 * the log: when a message does not arrive, this is the artefact worth
+	 * looking at, and re-deriving it later would prove nothing. */
+	char last_pdu[FM160_AT_PAYLOAD_MAX];
+	char last_send_cmd[FM160_AT_CMD_MAX];
+	int  last_segments;
+	bool busy;                     /* a send or a fetch is in flight */
+};
+
 struct fm160_state {
 	/* port */
 	char port[FM160_PORT_MAX];
@@ -567,6 +692,11 @@ struct fm160_state {
 	 * per-read picture and its own write gate. */
 	struct fm160_gnss_state     gnss;
 
+	/* M3: SMS.  Its own table for the same reason GNSS has one: it is a
+	 * subsystem with its own storage, its own readiness gate and its own
+	 * write path, not three settings on one screen. */
+	struct fm160_sms_state      sms;
+
 	/* netdev counters (read from sysfs, costs zero AT) */
 	char netdev[32];
 	uint64_t rx_bytes, tx_bytes;
@@ -607,6 +737,12 @@ enum {
 	 * own quiet window rather than sharing QUIET_MANUAL. */
 	QUIET_BANDS,
 	QUIET_CELLLOCK,
+	/* M3.  The SMS setup (CMGF/CPMS/CNMI) and the fetch of a stored message
+	 * both answer in seconds on a modem with no card, and AT+CPMS? was
+	 * measured at 10.3 s.  A poll landing in the middle of the CMGS prompt
+	 * transaction would be read by the modem as the message body, so the
+	 * window covers the whole send. */
+	QUIET_SMS,
 };
 
 extern struct fm160_state g_state;
@@ -634,6 +770,19 @@ int  atq_init(void);
  * window, circuit open) and -ENOSPC when the queue is full. */
 int  atq_submit(enum at_prio prio, const char *cmd, const char *end_flag,
 		int timeout_ms, at_done_cb cb, void *arg);
+/*
+ * A two-stage request: send `cmd`, wait for `prompt`, then write the raw bytes
+ * encoded in `payload_hex` (no line terminator - the caller includes the 0x1A)
+ * and wait for `end_flag`.
+ *
+ * The callback receives the outcome of the exchange as a whole.  A request that
+ * never reaches the prompt is reported as a timeout with the modem's partial
+ * answer in the response, so the caller can tell "the modem refused" from "the
+ * modem never answered".
+ */
+int  atq_submit_prompt(enum at_prio prio, const char *cmd, const char *prompt,
+		       const char *payload_hex, const char *end_flag,
+		       int timeout_ms, at_done_cb cb, void *arg);
 int  atq_submit_silent(enum at_prio prio, const char *cmd, int timeout_ms);
 void atq_set_quiet(int kind, const char *reason, int seconds);
 void atq_clear_quiet(void);
@@ -747,6 +896,60 @@ void fm160_parse_gnss_supl(const char *resp);
 /* Band encoding shared by the parsers and the write path. */
 int  fm160_band_decode(int rat, int raw);
 int  fm160_band_rat_of(int raw);
+
+/* ------------------------------------------------------------------ */
+/* sms.c - the SMS subsystem (M3)                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The whole subsystem is driven from two places: a page asking for something
+ * ("send", "refresh", "delete"), and the modem announcing a message of its own
+ * accord (+CMTI).  There is no timer behind any of it - see the note above
+ * struct fm160_sms_state for the measurements that decided that.
+ */
+
+/* Reset the counters and load whatever we have stored locally. */
+void fm160_sms_init(void);
+/* Drive the one-time AT+CMGF / AT+CPMS / AT+CNMI setup.  Safe to call from
+ * anywhere and as often as you like: it submits nothing once the setup has
+ * succeeded, and backs off after a refusal instead of retrying into a modem
+ * that has already said no. */
+void fm160_sms_setup_tick(void);
+bool fm160_sms_usable(void);
+
+/* Pull the messages the modem is holding.  Priority 1, opens the SMS quiet
+ * window, and refuses while another SMS operation is in flight. */
+int  fm160_cmd_sms_sync(void);
+/* Read one index and append it - the +CMTI path. */
+int  fm160_cmd_sms_fetch(int index);
+/* Remove one message from the modem (and from our list). */
+int  fm160_cmd_sms_delete(int index, at_done_cb cb, void *arg);
+/* Encode, split and send.  cb is called once, with the outcome of the whole
+ * message - not once per segment. */
+int  fm160_cmd_sms_send(const char *number, const char *text,
+			at_done_cb cb, void *arg);
+
+/* Consume an unsolicited line.  Returns true when it was one of ours. */
+bool fm160_sms_handle_urc(const char *line);
+
+/* Our own list, newest first.  nth 0 is the most recent. */
+int  fm160_sms_count(void);
+const struct fm160_sms_msg *fm160_sms_get(int nth);
+/* One message by its local id, or NULL.  Used by the delete path, which needs
+ * the modem-side index before it can decide whether the modem has a copy to
+ * remove as well. */
+const struct fm160_sms_msg *fm160_sms_find(uint64_t id);
+/* Drop one message by its local id.  Returns 0, or -ENOENT. */
+int  fm160_sms_delete_local(uint64_t id);
+int  fm160_sms_mark_read(uint64_t id);
+void fm160_sms_clear(void);
+
+/* Parsers.  Exposed for the host-side test and the AT debug page. */
+void fm160_parse_cmgr(const char *resp, int index, const char *storage);
+void fm160_parse_cpms(const char *resp);
+void fm160_parse_cpms_caps(const char *resp);
+void fm160_parse_cmgl(const char *resp);
+void fm160_parse_cmgs(const char *resp);
 
 /* ------------------------------------------------------------------ */
 /* ubus_methods.c                                                       */
