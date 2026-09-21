@@ -141,6 +141,14 @@ mkdir -p "$OUT"
 cd "$ROOT" || exit 2
 
 fail=0
+# For the failure report at the end.  Every gate below is guarded by
+# `[ "$fail" = 0 ]` so that a broken compile does not produce a cascade of
+# misleading downstream errors, but that guard also suppresses the *reason*:
+# a compile failure goes into out/<name>.log and nothing ever printed it, so
+# the visible result of any failure was "exit 1 with no output at all".
+# These two variables are what the report needs to explain itself.
+bad_compiles=""
+stopped_in=""
 
 # This sandbox intercepts `rm` and kills the whole script with SIGTERM, so
 # removals go through Python.  (Symptom if you use rm: no output at all and
@@ -186,6 +194,7 @@ run_one() {          # $1 = basename, $2 = path relative to $ROOT
 		| grep -v '^zig: warning: argument unused' > "$log"
 	if [ -s "$log" ]; then
 		fail=1
+		bad_compiles="$bad_compiles $name"
 	else
 		# Only keep logs that have something to say (i.e. the failures).
 		del "$OUT_W/$name.log"
@@ -213,6 +222,7 @@ del "$OUT_W/hdr_check.c"
 # and FM160_VERSION drifting from PKG_VERSION.  Both are cross-file facts that
 # the compile above cannot see, and both fail somewhere other than here.
 if [ "$fail" = 0 ]; then
+	stopped_in="makecheck.py"
 	mkout=$("$PY" "$HERE_W/makecheck.py" 2>&1)
 	mkrc=$?
 	echo "$mkout"
@@ -220,6 +230,7 @@ if [ "$fail" = 0 ]; then
 fi
 
 if [ "$fail" = 0 ]; then
+	stopped_in="symcheck.py"
 	symout=$("$PY" "$HERE_W/symcheck.py" "$OUT_W" 2>&1)
 	symrc=$?
 	echo "$symout"
@@ -231,6 +242,7 @@ fi
 # "/bin/sh /etc/rc.common\r".  Cheap to check, very expensive to debug.
 # Relative paths only for python - see the note about $OUT_W above.
 if [ "$fail" = 0 ]; then
+	stopped_in="eolcheck.py"
 	"$PY" "$HERE_W/eolcheck.py" . || fail=1
 fi
 
@@ -240,7 +252,34 @@ fi
 # overview.js was committed, packaged and pushed with a syntax error.  Parsing
 # four small files costs a moment.
 if [ "$fail" = 0 ]; then
+	stopped_in="tools/jscheck/check.sh"
 	sh "$ROOT/tools/jscheck/check.sh" || fail=1
+fi
+
+# --- say why, when it fails -----------------------------------------------
+# Nothing above prints a compiler diagnostic: the capture in run_one() is the
+# only place the two lines of a type error exist, and it is written to a file
+# that is never read.  On a CI runner there is no out/ to inspect afterwards,
+# so "check.sh: FAILED" with an empty log is all anyone got -- a failure that
+# is indistinguishable from the gate not having run at all, which is what cost
+# an hour of guessing at the pipeline's own conditions (host, branch, case
+# sensitivity, line endings) for a compile error that was sitting in a file.
+if [ "$fail" != 0 ]; then
+	echo
+	echo "=== cccheck FAILED ==="
+	if [ -n "$bad_compiles" ]; then
+		echo "sources that did not compile:$bad_compiles"
+	elif [ -n "$stopped_in" ]; then
+		echo "last gate entered: $stopped_in"
+	fi
+	# The logs are the failures: run_one() deletes every log that came out
+	# empty, and the summary wipe at the top of this script clears the rest.
+	for f in "$OUT"/*.log; do
+		[ -f "$f" ] || continue
+		echo
+		echo "--- $(basename "$f") ---"
+		cat "$f"
+	done
 fi
 
 if [ "$fail" = 0 ]; then
