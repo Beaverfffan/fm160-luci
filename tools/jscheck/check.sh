@@ -19,7 +19,14 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 # `pwd -W` is an MSYS extension and cygpath does not exist on a POSIX host, so
 # the fallback is the path we were given rather than a second conversion tool.
-HERE_W=$((cd "$HERE" && pwd -W 2>/dev/null) || printf '%s' "$HERE")
+#
+# The space after `$(` is load-bearing.  `$((` starts an arithmetic expansion in
+# every POSIX shell, and the group below is not arithmetic: bash notices that
+# and falls back to a subshell, dash does not and dies parsing the file --
+# "Syntax error: Missing '))'" -- before a single .js has been looked at.  This
+# is why jscheck never ran on a CI runner (whose /bin/sh is dash) while passing
+# on the workstation (whose sh is bash).
+HERE_W=$( (cd "$HERE" && pwd -W 2>/dev/null) || printf '%s' "$HERE")
 
 VIEWS="$ROOT/luci-app-fm160/htdocs"
 # Windows-style twin of VIEWS: the python and node in use are Windows
