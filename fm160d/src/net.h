@@ -60,9 +60,28 @@ const char *fm160_net_step_name(enum fm160_net_step s);
 /*
  * The vendor contradicts itself about ECM.  The AT manual (11.1.15) says
  * ECM/RMNET use +GTWWAN and only RNDIS uses +GTRNDIS; the dial-up document
- * V1.0's own ECM chapter shows AT+GTRNDIS=1,1, FM160 example included.  So the
- * verb is probed at run time and cached, never hardcoded - which is why it is a
- * value here rather than being spelled into the command builders.
+ * V1.0's own ECM chapter shows AT+GTRNDIS=1,1, FM160 example included.
+ *
+ * ★★ Measured on the FM160 at hand (2026-09-20, both profiles), and this is
+ * what the code has to survive:
+ *
+ *   profile 32 (QMI)   +GTWWAN=?  answered     +GTWWAN=1,1   REFUSED
+ *                      +GTRNDIS=? answered     +GTRNDIS=1,1  accepted, and
+ *                                              the read-back carries the address
+ *   profile 33 (ECM)                           +GTWWAN=1,1   REFUSED
+ *                                              +GTRNDIS=1,1  REFUSED too
+ *                                              ...and the ECM data plane was
+ *                                              carrying traffic anyway
+ *
+ * ⇒ the accept/reject pattern of a verb is a property of the PROFILE, not of
+ * the unit, and a capability probe ("=?" ) is answered for BOTH verbs and
+ * therefore cannot choose between them.  Two consequences the code depends on:
+ *   - the verb must be chosen by trying the real write (see dialer.c), not by
+ *     asking "=?" - a probe that freezes the verb silently makes the other one
+ *     unreachable for the lifetime of the process;
+ *   - a refusal of the write is not proof that the context is down: the module
+ *     is allowed to have activated it on its own, which is exactly what profile
+ *     33 does.  The read-back is the verdict, never the write's status.
  */
 enum fm160_net_verb {
 	NET_VERB_GTWWAN = 0,

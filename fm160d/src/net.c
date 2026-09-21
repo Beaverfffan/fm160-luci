@@ -407,7 +407,25 @@ bool fm160_net_parse_wwan(const char *resp, struct fm160_net_wwan *st)
 	st->active = -1;
 	st->cid = -1;
 
+	/*
+	 * ⚠️ BOTH verb families are accepted here, and that is a measurement
+	 * rather than a precaution.  On the FM160 in this project, the ECM
+	 * profile (33) answers "+GTWWAN: 1,1," after AT+GTWWAN=1,1 is REFUSED,
+	 * while the QMI profile (32) refuses +GTWWAN outright and answers
+	 * +GTRNDIS with a real address.  A parser that only knew the +GTWWAN
+	 * tag could therefore never report a link as up in one of the two
+	 * comps, whatever the dialer did - the read-back would look like an
+	 * unparseable answer and the ladder would time out on a link that is
+	 * actually carrying traffic.
+	 *
+	 * The two answers have the same shape (<cid>,<active>,["pdp",dnss...]),
+	 * which is what makes one parser sufficient; the capability answer
+	 * ("+GTRNDIS: (0,1),(1-23)") is rejected by the "must start with a
+	 * digit" check below, so accepting the second tag adds no ambiguity.
+	 */
 	body = find_tagged(resp, "+GTWWAN");
+	if (!body)
+		body = find_tagged(resp, "+GTRNDIS");
 	if (!body || !(*body == '0' || (*body >= '0' && *body <= '9')))
 		return false;
 
@@ -420,13 +438,24 @@ bool fm160_net_parse_wwan(const char *resp, struct fm160_net_wwan *st)
 
 	st->valid = true;
 
-	/* "+GTWWAN: 0" is the documented "not active" answer. */
+	/* "<verb>: 0" - one field - is the documented "not active" answer, and
+	 * the FM160 gives it for either tag. */
 	if (st->raw_n == 1) {
 		st->active = atoi(st->raw[0]);
 		return true;
 	}
 
-	/* See the header: the order of the first two fields is assumed. */
+	/*
+	 * See the header: the order of the first two fields is assumed.  The one
+	 * ECM answer this project has actually seen is "+GTWWAN: 1,1," - three
+	 * fields with the third empty - which is consistent with both orders for
+	 * cid 1 and therefore still does not settle it.
+	 * ⚠️ Note what is NOT here: an address.  In an ECM profile the module
+	 * answers with the two integers and nothing else, because the address is
+	 * handed out by the module's own DHCP server over the netdev, not by AT
+	 * (see fm160.sh step 4).  Callers must therefore not require has_addr to
+	 * declare an ECM link up.
+	 */
 	st->cid = atoi(st->raw[0]);
 	st->active = atoi(st->raw[1]);
 	/*
