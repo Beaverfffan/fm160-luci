@@ -182,6 +182,26 @@ for f in os.listdir(d):
             pass
 " "$OUT_W"
 
+# Same class of problem one level down, and much harder to see: zig does not
+# replay a diagnostic when it answers a compile out of its cache.  A unit that
+# once compiled *with a warning* keeps its cached object, and every later run
+# reports nothing for it -- so the verdict depends on whether .zigcache happens
+# to be warm, with the warm answer being the wrong one.  Measured on this tree,
+# same sources, same compiler, nothing else changed:
+#
+#     warm cache  -> exit 0, "fm160: clean"
+#     wiped       -> exit 1, modesw.c:62:13: warning: unused function 'copy_str'
+#
+# which is why CI (cold every run) failed on a warning that never appeared
+# locally, and why that warning stayed invisible behind the empty failure
+# output.  Only the local cache is dropped: the global one holds the musl
+# headers and compiler-rt, which are what make a cold build slow.
+"$PY" -c "
+import shutil, sys
+shutil.rmtree(sys.argv[1], ignore_errors=True)
+" "$HERE_W/.zigcache/l"
+mkdir -p "$HERE/.zigcache/l"
+
 run_one() {          # $1 = basename, $2 = path relative to $ROOT
 	name=$1
 	log="$OUT/$name.log"
