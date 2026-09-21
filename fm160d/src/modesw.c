@@ -59,21 +59,6 @@ static struct fm160_modesw *M(void)
 	return &g_state.modesw;
 }
 
-static void copy_str(char *dst, size_t n, const char *src)
-{
-	size_t len;
-
-	if (!n)
-		return;
-	if (!src)
-		src = "";
-	len = strlen(src);
-	if (len >= n)
-		len = n - 1;
-	memcpy(dst, src, len);
-	dst[len] = '\0';
-}
-
 static void modesw_error(const char *fmt, ...)
 {
 	struct fm160_modesw *m = M();
