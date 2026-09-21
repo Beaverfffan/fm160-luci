@@ -26,6 +26,12 @@
 
 M2 之后的功能仍按约定「先出代码」，依赖设备实际能力处一律运行期探测 + 保守默认 + 显式告警，见 `docs/PLAN.md` §4。
 
+**旁路交付：`fm160-qmi/`（2026-09-21）** —— 一台 H69K + USB 外接 FM160 上，
+用**全开源**栈（`uqmi` + `netifd` + procd，零厂商二进制）把 QMI 数据面打通并验收：
+冷启动全自动建链、**5G SA 驻留**（`AT+COPS` act=11、`AT+C5GREG: 0,1`）下 ping/wget 40 MB 通过、
+`.ipk` 真机 `opkg install` 通过。同时把「QMI 偶发超时」定性为**请求级偶发失败**并量化
+（开机 0–200 s ≈ 1.8%，稳态 <0.17%）。与 M2 的关系见上方「两条拨号路径」。
+
 ---
 
 ## 目录结构
@@ -57,6 +63,11 @@ fm160-luci/
 │   ├── htdocs/luci-static/resources/view/fm160/{overview,signal,cells,dial,gnss,sms,debug}.js
 │   ├── po/zh_Hans/fm160.po     简体中文（140 条，编译成 fm160.zh-cn.lmo）
 │   └── root/usr/share/{luci/menu.d,rpcd/acl.d}/luci-app-fm160.json
+├── fm160-qmi/          拨号层（可选）：全开源 QMI 拨号器，只用 uqmi + netifd，零厂商二进制
+│   ├── etc/{config,init.d}/fm160-qmi        uci 配置 + procd 服务（自愈重拨）
+│   ├── usr/sbin/fm160-qmi{, -at}            拨号器本体 + 零依赖 AT 助手
+│   ├── tools/{140-build-ipk,141-verify-ipk}.py   纯 Python 打包 / 校验 .ipk
+│   └── README.md        实测结论：5G SA 验收、QMI「偶发超时」的真机理、已知边界
 ├── tools/              门禁（每个都能单独跑；`sh tools/check.sh` 是总入口）
 │   ├── check.sh            总编排；STRICT=1 时 SKIP 记为失败（CI 用这个）
 │   ├── cccheck/            真 libubox/libubus 头文件下的编译 + 符号表 + OBJS/版本一致性 + CRLF
@@ -65,8 +76,20 @@ fm160-luci/
 │   ├── hosttest/           diag.c 的主机侧编译并运行测试（需要 Linux 上的 cc）
 │   └── lib/tooling.sh      共用助手（路径转换、删除走 python 避开沙箱）
 ├── .github/workflows/  CI：ubuntu-latest 上跑 tools/check.sh（STRICT=1）
-└── docs/{AT-FACTS.md, DESIGN.md, PLAN.md}
+├── docs/{AT-FACTS, DESIGN, PLAN, HARDWARE-PROBE, BUILD-ISTOREOS-H69K}.md
+└── notes/              工作日志与长期索引（引用约定见 notes/README.md）
 ```
+
+### 两条拨号路径（共用 `/dev/cdc-wdm0`，别同时开）
+
+| | `fm160d` 的拨号（M2） | `fm160-qmi/` |
+|---|---|---|
+| 形态 | 项目内 C 状态机（`dialer.c` / `net.c`），配 LuCI 页面 | 独立 POSIX sh 脚本，直接调 `uqmi` |
+| 依赖 | 本项目自己的 proto 与脚本 | 只要 `uqmi` + `netifd`，**零厂商二进制** |
+| 定位 | 设备上的常驻实现 | **已真机验证的参考实现**：5G SA 验收、QMI 偶发失败的量化、已知边界都写在那里 |
+
+`/dev/cdc-wdm0` 是**单 reader** 设备：`uqmi` / `qmicli` / `quectel-CM` / `fm160-qmi`
+互相之间必须独占，**不要两个一起跑**。
 
 ## 分层
 
