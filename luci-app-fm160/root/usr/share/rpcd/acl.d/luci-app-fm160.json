@@ -6,6 +6,9 @@
 				"fm160": [ "status", "identity", "profile", "sms_list",
 					   "profiles", "diagnostics" ]
 			},
+			"file": {
+				"/usr/libexec/fm160-prefix-lan.sh": [ "exec" ]
+			},
 			"uci": [ "fm160" ]
 		},
 		"write": {
@@ -14,6 +17,9 @@
 					   "setgnss", "setgnsscfg",
 					   "sms_send", "sms_delete", "sms_markread", "sms_sync",
 					   "dial_start", "dial_stop", "dial_config", "setusbmode" ]
+			},
+			"file": {
+				"/etc/init.d/fm160-prefix": [ "exec" ]
 			},
 			"uci": [ "fm160" ]
 		}

@@ -28,6 +28,14 @@ define Package/fm160d/description
  is deliberately gentle on the Qualcomm AT parser, and exposes one ubus object
  ("fm160") that the LuCI front end talks to.  All AT traffic on the device is
  funnelled through this daemon.
+
+ It also carries the LAN's IPv6 for an ECM link: /etc/init.d/fm160-prefix and
+ /usr/libexec/fm160-prefix-lan.sh put the operator's /64 on the LAN bridge so
+ that odhcpd can advertise it, and give odhcpd an ndp relay on the mobile
+ interface so inbound traffic can resolve.  The relay matters because the modem
+ resolves every destination one address at a time; odhcpd is used rather than a
+ separate proxy daemon because it already tracks the LAN, covers addresses it
+ has never seen, and needs no per-client entries to keep in step.
 endef
 
 define Build/Prepare
@@ -67,6 +75,16 @@ define Package/fm160d/install
 	$(INSTALL_BIN) ./files/usr/libexec/fm160-preflight.sh $(1)/usr/libexec/
 	$(INSTALL_DIR) $(1)/lib/netifd/proto
 	$(INSTALL_BIN) ./files/lib/netifd/proto/fm160.sh $(1)/lib/netifd/proto/
+
+	# The LAN's IPv6.  The init script is enabled by uci-defaults and does
+	# nothing at all until fm160.main.lan_ipv6 is set, so enabling it is not a
+	# behaviour change for anyone who never turns the option on.
+	$(INSTALL_DIR) $(1)/usr/libexec
+	$(INSTALL_BIN) ./files/usr/libexec/fm160-prefix-lan.sh $(1)/usr/libexec/
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./files/etc/init.d/fm160-prefix $(1)/etc/init.d/
+	$(INSTALL_DIR) $(1)/etc/hotplug.d/iface
+	$(INSTALL_BIN) ./files/etc/hotplug.d/iface/31-fm160-prefix $(1)/etc/hotplug.d/iface/
 endef
 
 $(eval $(call BuildPackage,fm160d))

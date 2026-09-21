@@ -29,6 +29,37 @@ if ! uci -q get fm160.switch >/dev/null; then
 	uci -q commit fm160
 fi
 
+# --- the LAN's IPv6 ------------------------------------------------------
+#
+# lan_ipv6 is newer than most installs, and an upgrade keeps the OLD
+# /etc/config/fm160 (it is a conffile).  uci has no "create the option if it is
+# missing", so it is spelled out; the value is the one the file ships with, so an
+# existing install ends up identical to a fresh one.
+#
+# Only a MISSING option is filled in.  An install that has the option at all
+# keeps whatever it says, including a deliberate 0 -- this runs on every
+# (re)install, and rewriting a user's choice here would make the setting
+# impossible to turn off from the config file.
+if ! uci -q get fm160.main.lan_ipv6 >/dev/null; then
+	uci -q set fm160.main.lan_ipv6='1'
+	uci -q commit fm160
+fi
+
+# Same treatment for the dial profile.  An install that predates it has no
+# dial_pdp at all and would otherwise stay IPv4-only by omission, which is
+# exactly the silent case the option exists to avoid.
+if ! uci -q get fm160.main.dial_pdp >/dev/null; then
+	uci -q set fm160.main.dial_pdp='IPV4V6'
+	uci -q commit fm160
+fi
+
+# Enabled, and now actually doing something: the init script installs the
+# prefix on boot if the link is already up, and does nothing at all while
+# lan_ipv6 is 0.  It is enabled because the whole point of the option is that
+# the prefix survives a reboot -- a service started only by the next hotplug
+# event would leave the LAN without global IPv6 until the link bounced.
+[ -x /etc/init.d/fm160-prefix ] && /etc/init.d/fm160-prefix enable
+
 # ModemManager opens every ttyUSB it finds and will interleave with our
 # transactions, so fm160d wants to be the single owner of the AT port.
 #

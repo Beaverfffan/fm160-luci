@@ -2,6 +2,8 @@
 'require view';
 'require poll';
 'require ui';
+'require fs';
+'require rpc';
 'require fm160.api as api';
 
 /*
@@ -38,6 +40,14 @@
  * The AT port can also be absent because a profile switch is in progress - that
  * is expected, it is not a fault, and the wording of the banner says so.  The
  * switch itself, and the state of the module behind it, is on the USB mode page.
+ *
+ * Two settings on this page are NOT dial settings, and they are the two the
+ * daemon has no opinion about: the defaults the package ships (offered at the
+ * moment Connect is pressed, below) and the LAN's IPv6, which is a uci option
+ * read by an init script rather than by fm160d.  They are handled here rather
+ * than on a page of their own because they are both things that decide whether
+ * the link a user just asked for is usable, and a link that comes up without
+ * IPv6 is exactly the surprise this page exists to prevent.
  */
 
 /* --- small helpers, in the house style of the cells page --------------- */
@@ -70,6 +80,124 @@ function section(title, children) {
 	return E('div', { 'class': 'cbi-section' }, [ E('h3', {}, title) ].concat(children));
 }
 
+/* --- the one uci option this page owns -------------------------------- */
+
+/*
+ * fm160.main.lan_ipv6 is read by /etc/init.d/fm160-prefix, not by fm160d, so
+ * there is no ubus method for it and the front end uses the uci rpc directly.
+ * The app's ACL already grants read and write on the fm160 config, and it is
+ * granted per-config on purpose: this page can touch fm160 and nothing else.
+ *
+ * The value is written and committed and then the service is asked to reload,
+ * in that order.  Asking the service first would have it read the old value,
+ * and a toggle that appears to do nothing until the next hotplug event is worse
+ * than one that reports the failure.
+ */
+var callUciGet = rpc.declare({
+	object: 'uci', method: 'get',
+	params: [ 'config', 'section', 'option' ], expect: {}
+});
+
+var callUciSet = rpc.declare({
+	object: 'uci', method: 'set',
+	params: [ 'config', 'section', 'option', 'value' ], expect: {}
+});
+
+var callUciCommit = rpc.declare({
+	object: 'uci', method: 'commit', params: [ 'config' ], expect: {}
+});
+
+function readLanIPv6() {
+	return callUciGet('fm160', 'main', 'lan_ipv6')
+		.then(function(r) { return (r && r.value) === '1'; })
+		/* Unset reads as off, which is also how the script that owns the
+		 * behaviour reads it - it tests for a literal "1". */
+		.catch(function() { return false; });
+}
+
+/*
+ * The LAN's IPv6 state, straight from the script that owns it, so the page
+ * shows what is on the wire rather than what was requested.
+ */
+function readPrefixStatus() {
+	return fs.exec('/usr/libexec/fm160-prefix-lan.sh', [ 'status' ])
+		.then(function(res) { return (res && res.stdout) || ''; })
+		.catch(function() { return null; });
+}
+
+function prefixField(txt, name) {
+	var m = new RegExp('^' + name + '\\s+(.*)$', 'm').exec(txt || '');
+	return m ? m[1].trim() : '';
+}
+
+/* --- a v4-only context, noticed at the moment it matters -------------- */
+
+/*
+ * The package now ships a dual-stack profile (dial_pdp IPV4V6) with the LAN's
+ * IPv6 on by default, so a fresh install has IPv6 from its first dial and
+ * nothing below fires.  What this catches is the other case: a PDP type of IP,
+ * which is IPv4-only by definition.
+ *
+ * The reason that deserves a dialogue is that the failure is invisible from
+ * here.  An IP context activates perfectly happily, gets an address and routes
+ * IPv4; the only symptom is that the link -- and therefore the LAN -- has no
+ * IPv6 at all, and "the router has no IPv6" is a search that starts in the
+ * wrong place and usually ends at odhcpd.
+ *
+ * It is a question and not a rewrite, because IPv4-only is a legitimate choice:
+ * a SIM that bills the two families separately is exactly the case for it.  The
+ * ask is also skipped once the user has answered durably elsewhere --
+ * connect-at-boot on means somebody configured this link on purpose, and
+ * re-asking on every dial is how people learn to click through without reading.
+ *
+ * Resolves true (override then dial), false (dial as configured), or null
+ * (cancelled).
+ */
+function askDialDefaults(state) {
+	return new Promise(function(resolve) {
+		function done(v) {
+			ui.hideModal();
+			resolve(v);
+		}
+
+		var btn = 'btn cbi-button';
+
+		ui.showModal(_('This link would have no IPv6'), [
+			E('p', {}, [
+				_('The PDP type is IP, which asks the network for an IPv4-only context, and connect-at-boot is off.'),
+				' ',
+				_('An IPv4-only context carries no IPv6 at all - not on this link, and not on the LAN, whatever the LAN settings say.')
+			]),
+			E('p', {}, [
+				_('That is a legitimate choice on a SIM that bills the two families separately.'),
+				' ',
+				_('If it is not what you meant, the context has to be asked for as IPV4V6.')
+			]),
+			E('p', { 'class': 'hint' }, [
+				_('Overriding sets the PDP type to IPV4V6 and turns connect-at-boot on, so this link comes back by itself after a reboot.'),
+				' ',
+				_('An APN is still required either way - with an empty APN, Connect is refused.')
+			]),
+			E('div', { 'class': 'right' }, [
+				E('button', {
+					'class': btn,
+					'click': function() { done(null); return Promise.resolve(); }
+				}, _('Cancel')),
+				' ',
+				E('button', {
+					'class': btn,
+					'click': function() { done(false); return Promise.resolve(); }
+				}, _('Connect as configured')),
+				' ',
+				E('button', {
+					'class': 'btn cbi-button cbi-button-apply',
+					'click': function() { done(true); return Promise.resolve(); }
+				}, _('Override and connect'))
+			])
+		]);
+	});
+}
+
 /*
  * The foreground hold makes the daemon shorten its polling intervals and switch
  * on the tiers that only run for an open page.
@@ -86,11 +214,22 @@ function holdForeground(st) {
 
 return view.extend({
 	load: function() {
-		return api.status();
+		/* Three independent reads.  The dial snapshot comes from fm160d; the
+		 * other two are what this page needs to tell the truth about the LAN,
+		 * and neither of them is in that snapshot. */
+		return Promise.all([
+			api.status(),
+			readLanIPv6(),
+			readPrefixStatus()
+		]);
 	},
 
-	render: function(state) {
+	render: function(data) {
 		var self = this;
+		var state = data[0];
+
+		this.lanIPv6 = !!data[1];
+		this.prefixStatus = data[2];
 
 		this.container = E('div', {});
 		/* The settings form is built ONCE.  It holds text inputs, and the rest
@@ -124,6 +263,7 @@ return view.extend({
 		this.container.appendChild(this.renderBanner(state));
 		this.container.appendChild(this.renderLink(state));
 		this.container.appendChild(this.settings);
+		this.container.appendChild(this.renderLanIPv6());
 		this.container.appendChild(this.renderNotes(state));
 	},
 
@@ -178,10 +318,7 @@ return view.extend({
 				'class': 'btn cbi-button cbi-button-apply',
 				'disabled': (!usable || up || d.wanted) ? 'disabled' : null,
 				'click': ui.createHandlerFn(this, function() {
-					return api.dialStart().then(function(res) {
-						self.reportDial(res);
-						return self.refresh();
-					});
+					return self.connect();
 				})
 			}, _('Connect')),
 			' ',
@@ -260,6 +397,52 @@ return view.extend({
 		return api.status().then(function(s) {
 			self.state = s;
 			self.paint(s);
+		});
+	},
+
+	/*
+	 * Connect, with a v4-only context called out once - and only when there is
+	 * something to call out.
+	 *
+	 * The package ships IPV4V6, so this does nothing on a fresh install.  It
+	 * fires for a context that is IP, and only then while connect-at-boot is
+	 * off: a user who turned that on has configured this link on purpose, and
+	 * re-asking on every dial attempt would be the kind of dialogue people
+	 * learn to click through without reading.
+	 */
+	connect: function() {
+		var self = this, d = api.dialOf(this.state);
+		var v4Only = (api.dialPdp(this.state) === 'IP' && !d.autostart);
+
+		var ask = v4Only ? askDialDefaults(this.state) : Promise.resolve(false);
+
+		return ask.then(function(override) {
+			if (override === null)
+				return null;
+
+			if (!override)
+				return api.dialStart();
+
+			/* The override goes through the daemon like every other write on
+			 * this page, so it is validated and stored in one step and the
+			 * reply is what was actually stored.  autostart is set alongside
+			 * the PDP type because a dual-stack context that nobody brings
+			 * back up after a reboot is half an override. */
+			return api.dialConfig(api.dialApn(self.state), 'IPV4V6',
+					      api.dialCid(self.state), d.allow_reset, true)
+				.then(function(res) {
+					info(_('Context set to IPV4V6, connect-at-boot on.'));
+					/* res is the stored configuration; the dial starts with
+					 * whatever the daemon just confirmed, not with what was
+					 * typed here. */
+					return api.dialStart();
+				});
+		}).then(function(res) {
+			if (res === null)
+				return null;		/* cancelled, nothing to report */
+
+			self.reportDial(res);
+			return self.refresh();
 		});
 	},
 
@@ -358,6 +541,119 @@ return view.extend({
 				}, _('Save'))
 			])
 		]);
+	},
+
+	/* --- the LAN's IPv6 --------------------------------------------- */
+
+	/*
+	 * This is the one thing on the page that is not the modem's business, and it
+	 * is here because it is the difference between "the link is up" and "the link
+	 * is usable".
+	 *
+	 * The ECM link gets a single /64 from the network and no IA_PD.  With no
+	 * prefix to hand out, odhcpd has nothing to advertise but the router's ULA -
+	 * and a ULA only becomes a usable prefix after ra_default is set, so by
+	 * default LAN clients get a router lifetime of zero, which is the protocol
+	 * saying "do not use me as a gateway".  The LAN has no global IPv6 at all.
+	 *
+	 * Turning fm160.main.lan_ipv6 on hands that same /64 to the LAN.  The router
+	 * keeps the operator prefix on the WAN and puts a second address out of it on
+	 * br-lan, which is all odhcpd needs: it reads addresses straight off netlink,
+	 * advertises the prefix as on-link with a non-zero lifetime, and delegates a
+	 * /62 out of it to the downstream router on the LAN.  No NAT, no translation,
+	 * no firewall rule - and no NPTv6, which this kernel cannot run correctly
+	 * (the rewrite sits at mangle priority -150, behind conntrack at -200, so
+	 * replies are classified as new connections before they are un-rewritten).
+	 *
+	 * The one thing the kernel will not do is answer neighbour solicitations for
+	 * a whole prefix: its own proxy_ndp is per-host by design, and the module
+	 * resolves every destination that way, so inbound would blackhole.  Which
+	 * mechanism covers that was measured, not assumed - a separate proxy daemon
+	 * never answered at all on this board, a kernel proxy entry works but needs
+	 * one entry per client address, and odhcpd's own ndp relay works with no
+	 * daemon, no sysctl and no list to maintain.  So the relay is what this
+	 * turns on.
+	 *
+	 * What is shown here is read back from the script that does the work, not
+	 * from the option, so the two can never disagree on screen.
+	 */
+	renderLanIPv6: function() {
+		var self = this;
+		var st = this.prefixStatus;
+
+		var cb = E('input', { 'type': 'checkbox', 'checked': this.lanIPv6 ? '' : null });
+
+		function save(ev) {
+			ev.currentTarget.blur();
+			var want = cb.checked;
+
+			return callUciSet('fm160', 'main', 'lan_ipv6', want ? '1' : '0')
+				.then(function() { return callUciCommit('fm160'); })
+				.then(function() { return fs.exec('/etc/init.d/fm160-prefix', [ 'reload' ]); })
+				.then(function() {
+					self.lanIPv6 = want;
+					info(_('Saved. The fields above are read back from the router.'));
+					return self.refreshLan();
+				})
+				.catch(function(e) {
+					cb.checked = self.lanIPv6 ? '' : null;
+					fail(_('Could not change this:') + ' ' + String((e && e.message) || e));
+				});
+		}
+
+		var rows = [];
+
+		if (st === null) {
+			rows.push(row(_('State'), _('the script that owns this is not installed')));
+		}
+		else {
+			var op = prefixField(st, 'operator /64');
+			var inst = prefixField(st, 'installed');
+			var relay = prefixField(st, 'odhcpd relay');
+
+			rows.push(row(_('Link'), op ?
+				E('span', {}, op) :
+				E('span', { 'class': 'hint' }, _('no global prefix on the mobile link yet - is it connected?'))));
+
+			rows.push(row(_('On the LAN'), inst ?
+				E('span', {}, inst + ' ' + _('(router address and route installed)')) :
+				E('span', { 'class': 'hint' }, _('not installed'))));
+
+			rows.push(row(_('Home-side lookup'), relay === 'relay' ?
+				E('span', {}, _('odhcpd relays neighbour discovery for the LAN')) :
+				E('span', { 'class': 'hint' }, _('not configured - inbound connections would not resolve'))));
+		}
+
+		return section(_('LAN IPv6'), [
+			E('table', { 'class': 'table' }, rows),
+			E('label', { 'style': 'display:block;margin:10px 0' }, [
+				cb, ' ',
+				_('Give the LAN the operator prefix, so its clients get real global addresses')
+			]),
+			E('p', { 'class': 'hint' }, [
+				_('On: LAN clients get a global address from the operator prefix by ordinary router advertisement, and are reachable from the internet, because nothing is translated.'),
+				' ',
+				_('The address changes when the operator prefix changes (a reconnect or a module reset), so this is not a stable address for a server.'),
+				' ',
+				_('Off: the LAN keeps its ULA and its IPv4, and has no global IPv6.')
+			]),
+			E('div', { 'class': 'cbi-page-actions' }, [
+				E('button', {
+					'class': 'btn cbi-button cbi-button-save',
+					'click': save
+				}, _('Save'))
+			])
+		]);
+	},
+
+	refreshLan: function() {
+		var self = this;
+
+		return readPrefixStatus().then(function(txt) {
+			self.prefixStatus = txt;
+			self.paint(self.state);
+			return null;
+		});
 	},
 
 	/* --- what this page deliberately does not do -------------------- */

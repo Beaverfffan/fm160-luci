@@ -1059,6 +1059,106 @@ msgstr "这台机器没有装 SIM 卡，所以拨号阶梯的成功路径——�
 msgid "Switching the USB profile restarts the module and is on its own page - it is not part of bringing the link up."
 msgstr "切换 USB 配置会重启模组，而且它自己单独占一个页面——它不属于把链路拨起来的一部分。"
 
+#: view/fm160/dial.js
+msgid "This link would have no IPv6"
+msgstr "这条链路不会有 IPv6"
+
+#: view/fm160/dial.js
+msgid "The PDP type is IP, which asks the network for an IPv4-only context, and connect-at-boot is off."
+msgstr "PDP 类型是 IP，即向网络申请的是仅 IPv4 的上下文，而开机自动连接是关闭的。"
+
+#: view/fm160/dial.js
+msgid "An IPv4-only context carries no IPv6 at all - not on this link, and not on the LAN, whatever the LAN settings say."
+msgstr "仅 IPv4 的上下文完全不承载 IPv6——这条链路上没有，LAN 上也没有，无论 LAN 的设置怎么写。"
+
+#: view/fm160/dial.js
+msgid "That is a legitimate choice on a SIM that bills the two families separately."
+msgstr "在把 IPv4 与 IPv6 分开计费的 SIM 上，这是完全合理的选择。"
+
+#: view/fm160/dial.js
+msgid "If it is not what you meant, the context has to be asked for as IPV4V6."
+msgstr "如果这不是你的本意，就得按 IPV4V6 申请上下文。"
+
+#: view/fm160/dial.js
+msgid "Overriding sets the PDP type to IPV4V6 and turns connect-at-boot on, so this link comes back by itself after a reboot."
+msgstr "选择覆盖会把 PDP 类型设为 IPV4V6 并打开开机自动连接，这样重启后这条链路会自己回来。"
+
+#: view/fm160/dial.js
+msgid "An APN is still required either way - with an empty APN, Connect is refused."
+msgstr "两种选择都仍然需要 APN——APN 为空时「连接」会被拒绝。"
+
+#: view/fm160/dial.js
+msgid "Connect as configured"
+msgstr "按当前配置连接"
+
+#: view/fm160/dial.js
+msgid "Override and connect"
+msgstr "覆盖并连接"
+
+#: view/fm160/dial.js
+msgid "Context set to IPV4V6, connect-at-boot on."
+msgstr "上下文已设为 IPV4V6，开机自动连接已打开。"
+
+#: view/fm160/dial.js
+msgid "Saved. The fields above are read back from the router."
+msgstr "已保存。上方各字段是从路由器读回来的实际情况。"
+
+#: view/fm160/dial.js
+msgid "Could not change this:"
+msgstr "无法修改："
+
+#: view/fm160/dial.js
+msgid "the script that owns this is not installed"
+msgstr "负责这项功能的脚本没有安装"
+
+#: view/fm160/dial.js
+msgid "no global prefix on the mobile link yet - is it connected?"
+msgstr "移动链路上还没有全球前缀——是不是还没连接？"
+
+#: view/fm160/dial.js
+msgid "On the LAN"
+msgstr "在 LAN 上"
+
+#: view/fm160/dial.js
+msgid "(router address and route installed)"
+msgstr "（路由器的地址和路由已装好）"
+
+#: view/fm160/dial.js
+msgid "not installed"
+msgstr "未安装"
+
+#: view/fm160/dial.js
+msgid "Home-side lookup"
+msgstr "回程解析"
+
+#: view/fm160/dial.js
+msgid "odhcpd relays neighbour discovery for the LAN"
+msgstr "odhcpd 为 LAN 代答邻居发现"
+
+#: view/fm160/dial.js
+msgid "not configured - inbound connections would not resolve"
+msgstr "未配置——外部主动连接将无法解析"
+
+#: view/fm160/dial.js
+msgid "LAN IPv6"
+msgstr "LAN IPv6"
+
+#: view/fm160/dial.js
+msgid "Give the LAN the operator prefix, so its clients get real global addresses"
+msgstr "把运营商前缀给 LAN，让它的客户端拿到真正的全球地址"
+
+#: view/fm160/dial.js
+msgid "On: LAN clients get a global address from the operator prefix by ordinary router advertisement, and are reachable from the internet, because nothing is translated."
+msgstr "开启：LAN 客户端通过普通的路由通告从运营商前缀获得全球地址；由于没有任何地址转换，它们也能从互联网直接访问。"
+
+#: view/fm160/dial.js
+msgid "The address changes when the operator prefix changes (a reconnect or a module reset), so this is not a stable address for a server."
+msgstr "地址会随运营商前缀变化（重拨或重置模组）而改变，所以它不适合作为服务器的固定地址。"
+
+#: view/fm160/dial.js
+msgid "Off: the LAN keeps its ULA and its IPv4, and has no global IPv6."
+msgstr "关闭：LAN 保留它的 ULA 和 IPv4，没有全球 IPv6。"
+
 #: view/fm160/gnss.js
 msgid "fm160d does not publish GNSS data - the installed daemon is older than this page."
 msgstr "fm160d 未发布 GNSS 数据——已安装的守护进程比本页面旧。"
