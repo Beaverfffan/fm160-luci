@@ -94,6 +94,11 @@
  * whether an activation the modem never acknowledged actually happened.  The
  * failure that matters - "the activation was refused" - arrives immediately and
  * as `+GTWWAN: 0`, so it is not affected by this at all.
+ *
+ * ★ Updated 2026-09-21: a refusal is now treated the same way as a timeout, for
+ * the same reason - see cb_activate().  On profile 33 the write IS refused and
+ * the link IS up, so "it arrives immediately" was never the useful half of that
+ * distinction; "the read-back is the verdict" is.
  */
 #define DIAL_ACTIVATE_MS    60000
 /* Quiet window covering an activation.  The modem may not accept AT while it
@@ -577,11 +582,48 @@ static void cb_activate(struct at_req *req, enum at_status status,
 	}
 
 	if (status != AT_STATUS_OK) {
-		dial_fail("the activation was refused");
-		dial_error("AT+%s=1,%d %s%s%s",
-			   fm160_net_verb_name((enum fm160_net_verb)st->verb),
-			   st->cid, status_text(status),
-			   word[0] ? ": " : "", word);
+		/*
+		 * ★★ A REFUSAL IS NOT A FAILED RUNG, and that is measured on
+		 * this unit rather than argued from the manual.
+		 *
+		 * net.h already records the shape of it - "profile 33 (ECM)
+		 * +GTWWAN=1,1 REFUSED, +GTRNDIS=1,1 REFUSED too, ...and the
+		 * ECM data plane was carrying traffic anyway" - and the same
+		 * header draws the conclusion this branch was violating:
+		 * "a refusal of the write is not proof that the context is
+		 *  down: the module is allowed to have activated it on its
+		 *  own, which is exactly what profile 33 does.  The read-back
+		 *  is the verdict, never the write's status."
+		 *
+		 * Real capture, 2026-09-21, profile 33, this unit, with no host
+		 * write of any kind beforehand (so the context was the module's
+		 * own doing, and AT+GTAUTOCONNECT was 0):
+		 *
+		 *   AT+GTWWAN=1,1  -> ERROR                    <- what the page showed
+		 *   AT+GTWWAN?     -> +GTWWAN: 1,1,"10.179.143.75,240e:400:...",
+		 *                                "218.2.2.2,240e:5a::6666",
+		 *                                "218.4.4.4,240e:5b::6666"
+		 *
+		 * and the interface went on to move 38.5 MB.  Failing here is
+		 * what produced step 8 / "the activation was refused" over a
+		 * link that had been up the whole time.
+		 *
+		 * So a refusal falls through to the read-back rung exactly like
+		 * a timeout does.  A genuinely refused activation is still
+		 * caught, one rung later and with a message that is true: the
+		 * read-back answers "+GTWWAN: 0" and cb_ip() fails on that.  The
+		 * cost is one rung of latency, and dial_fail() there still
+		 * counts the attempt, so the ladder is unaffected.
+		 */
+		fm160_log(LOG_WARNING,
+			  "dial: AT+%s=1,%d was refused (%s%s%s); reading the "
+			  "context back, because on this profile a refusal is "
+			  "not the verdict",
+			  fm160_net_verb_name((enum fm160_net_verb)st->verb),
+			  st->cid, status_text(status),
+			  word[0] ? ": " : "", word);
+		st->next_try_ms = 0;
+		dial_to(NET_STEP_IP);
 		return;
 	}
 

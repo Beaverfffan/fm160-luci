@@ -73,6 +73,24 @@ const char *fm160_net_step_name(enum fm160_net_step s);
  *                                              ...and the ECM data plane was
  *                                              carrying traffic anyway
  *
+ * ★★ Re-measured 2026-09-21, profile 33, context up, AT+GTAUTOCONNECT=0, and
+ * with NO host write of any kind beforehand:
+ *
+ *   AT+GTWWAN?
+ *     -> +GTWWAN: 1,1,"10.179.143.75,240e:400:1638:3d:3897:ecce:bfca:6f88",
+ *                        "218.2.2.2,240e:5a::6666","218.4.4.4,240e:5b::6666"
+ *
+ * ⇒ the module activates its OWN ECM context.  Nothing in this daemon had
+ *   written GTWWAN before that read, and the link then moved 38.5 MB over usb0
+ *   on a plain DHCP lease from the module (usb0 192.168.1.30/24, gw
+ *   192.168.1.1).  Two consequences for the code below, both of which it used
+ *   to get wrong:
+ *     - the activation WRITE is not what makes an ECM link work; it is what
+ *       gets REFUSED while the link already works, so a refusal must never end
+ *       the rung (dialer.c cb_activate);
+ *     - the address and both resolvers really are in the answer, packed as an
+ *       IPv4/IPv6 pair inside one quoted field (net.c addr_from_field).
+ *
  * ⇒ the accept/reject pattern of a verb is a property of the PROFILE, not of
  * the unit, and a capability probe ("=?" ) is answered for BOTH verbs and
  * therefore cannot choose between them.  Two consequences the code depends on:
@@ -147,7 +165,14 @@ struct fm160_net_wwan {
 	char dns1[FM160_NET_ADDR_MAX];
 	char dns2[FM160_NET_ADDR_MAX];
 	/* The first field of the answer that is an address, whatever the modem
-	 * calls it.  See the note about the assumed column order below. */
+	 * calls it.  See the note about the assumed column order below.
+	 *
+	 * ⚠️ Corrected 2026-09-21: this IS reachable on an ECM profile.  An
+	 * earlier note here claimed the ECM answer carried "the two integers and
+	 * nothing else" and told callers not to require has_addr - that was a
+	 * context that was not up.  Up and active, profile 33 reports the
+	 * address and both resolvers (see addr_from_field() in net.c), so cb_ip()
+	 * requiring has_addr is correct and no exemption is needed. */
 	bool has_addr;
 	char addr[FM160_NET_ADDR_MAX];
 	/* The fields verbatim, because the order is assumed (see above). */

@@ -114,6 +114,45 @@ static int split_csv(const char *line, char out[][FM160_NET_ADDR_MAX],
 }
 
 /*
+ * The first address inside ONE field, because one field can hold TWO.
+ *
+ * ★★ Measured 2026-09-21 on this unit, profile 33 (ECM), context up:
+ *
+ *      AT+GTWWAN?
+ *        -> +GTWWAN: 1,1,"10.179.143.75,240e:400:1638:3d:3897:ecce:bfca:6f88",
+ *                           "218.2.2.2,240e:5a::6666",
+ *                           "218.4.4.4,240e:5b::6666"
+ *
+ * The module packs an IPv4 and an IPv6 address into a single QUOTED field,
+ * and csv_field() keeps commas that are quoted - so the field arrives here as
+ * "10.179.143.75,240e:...", which fm160_net_addr_ok() rejects: it contains a
+ * ':', so it is tested as IPv6, and the '.' of the leading IPv4 then fails the
+ * hex test.  Validating the field as a whole therefore finds NO address in an
+ * answer that plainly carries one, and every ECM dial ends in "no address
+ * appeared after five reads of the context".
+ *
+ * Splitting on the comma and taking the first part that validates also picks
+ * the IPv4 one, which is the half the ECM netdev actually uses: the address on
+ * usb0 comes from the module's DHCP server, not from AT.
+ */
+static bool addr_from_field(const char *field, char *out, size_t outlen)
+{
+	const char *p = field;
+
+	while (*p) {
+		char part[FM160_NET_ADDR_MAX];
+
+		if (!csv_field(&p, part, sizeof(part)))
+			return false;
+		if (fm160_net_addr_ok(part)) {
+			set_str(out, outlen, part);
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
  * The text after "TOKEN:" on a line that starts with it, or NULL.  The line
  * must OPEN with the token: the echo of the command we sent contains the same
  * text and must never be read as the answer.
@@ -446,15 +485,26 @@ bool fm160_net_parse_wwan(const char *resp, struct fm160_net_wwan *st)
 	}
 
 	/*
-	 * See the header: the order of the first two fields is assumed.  The one
-	 * ECM answer this project has actually seen is "+GTWWAN: 1,1," - three
-	 * fields with the third empty - which is consistent with both orders for
-	 * cid 1 and therefore still does not settle it.
-	 * ⚠️ Note what is NOT here: an address.  In an ECM profile the module
-	 * answers with the two integers and nothing else, because the address is
-	 * handed out by the module's own DHCP server over the netdev, not by AT
-	 * (see fm160.sh step 4).  Callers must therefore not require has_addr to
-	 * declare an ECM link up.
+	 * See the header: the order of the first two fields is assumed.  The
+	 * manual's ?-syntax is "<state>,<cid>,<ip>,<pdns>,<sdns>" while the write
+	 * syntax is "<op>,<cid>", and everything measured so far has state == cid
+	 * == 1, so nothing has told the two orders apart.  It is left as it is
+	 * on purpose: flipping it would silently change st->cid for every context
+	 * that is not 1, and no measurement covers that case yet.
+	 *
+	 * ⚠️ CORRECTED 2026-09-21.  This comment used to say that an ECM profile
+	 * "answers with the two integers and nothing else", because the only ECM
+	 * answer this project had seen was "+GTWWAN: 1,1," - three fields with the
+	 * third empty.  That was a context that was NOT up.  With the context up,
+	 * profile 33 reports the address and both resolvers like any other profile
+	 * (full line in addr_from_field() above).  Two consequences:
+	 *
+	 *   - has_addr IS reachable on ECM, so cb_ip() may require it - which is
+	 *     what it does, and what net.h's "callers must not require has_addr"
+	 *     note would have contradicted;
+	 *   - the address arrives as an IPv4/IPv6 PAIR inside one quoted field,
+	 *     so the scan below must split before it validates (see
+	 *     addr_from_field()).
 	 */
 	st->cid = atoi(st->raw[0]);
 	st->active = atoi(st->raw[1]);
@@ -472,24 +522,32 @@ bool fm160_net_parse_wwan(const char *resp, struct fm160_net_wwan *st)
 		if (fm160_net_pdp_parse(st->raw[2], &p))
 			set_str(st->pdp, sizeof(st->pdp), fm160_net_pdp_name(p));
 	}
+	/*
+	 * Same "v4,v6 in one quoted field" shape as the address, so the same
+	 * split: "218.2.2.2,240e:5a::6666" is one field holding two resolvers.
+	 * The ECM path takes its resolver from the module's DHCP server over the
+	 * netdev (fm160.sh step 4), so these two are reported rather than used -
+	 * but reporting a comma-joined pair as a single DNS server is precisely
+	 * the kind of thing the AT page exists to show correctly.
+	 */
 	if (st->raw_n > 3)
-		set_str(st->dns1, sizeof(st->dns1), st->raw[3]);
+		addr_from_field(st->raw[3], st->dns1, sizeof(st->dns1));
 	if (st->raw_n > 4)
-		set_str(st->dns2, sizeof(st->dns2), st->raw[4]);
+		addr_from_field(st->raw[4], st->dns2, sizeof(st->dns2));
 
 	/*
-	 * Somewhere in the answer there is an address, and which field holds it
-	 * is not documented - the vendor's own example calls the last two
-	 * fields "pdns"/"sdns", which are DNS servers, yet the same section
-	 * says to read the IP from this command.  Rather than guess a column,
-	 * take the first field that IS an address and say so; a field like
-	 * "pdns" fails fm160_net_addr_ok() and is skipped, which is exactly the
-	 * discrimination wanted.  Field 0 and 1 are the two integers, so the
-	 * scan starts at 2.
+	 * Where the address sits is not announced, so rather than guess a
+	 * column, take the first field that CARRIES one.  Field 0 and 1 are the
+	 * two integers, so the scan starts at 2.
+	 *
+	 * Each field is passed through addr_from_field() rather than straight
+	 * into fm160_net_addr_ok(), because a field is allowed to hold the
+	 * module's IPv4/IPv6 pair ("10.179.143.75,240e:400:...").  Validating
+	 * the field as a whole finds no address in exactly the case the dialer
+	 * needs one - see addr_from_field().
 	 */
 	for (i = 2; i < st->raw_n; i++) {
-		if (fm160_net_addr_ok(st->raw[i])) {
-			set_str(st->addr, sizeof(st->addr), st->raw[i]);
+		if (addr_from_field(st->raw[i], st->addr, sizeof(st->addr))) {
 			st->has_addr = true;
 			break;
 		}
