@@ -228,11 +228,22 @@ int fm160_uci_set_int(const char *section, const char *option, long long v)
 	return fm160_uci_set(section, option, buf);
 }
 
+/*
+ * NOTE the sense of the test below.  uci_get_section() follows the C
+ * convention of the rest of this file -- 0 for success, -1 for failure --
+ * and every other caller writes `if (!fm160_uci_get(...))` to mean "use the
+ * value".  This one is the mirror of that: it returns the fallback when the
+ * READ FAILED, so the test must be positive.  Written the other way round it
+ * returns the fallback when the read SUCCEEDED, which makes every boolean in
+ * the section silently equal to its default no matter what uci says -- and
+ * because three of the four defaults happen to match the shipped config, the
+ * only visible symptom is the one option a user ever changes by hand.
+ */
 static bool uci_bool(const char *option, bool fallback)
 {
 	char v[32];
 
-	if (!uci_get_section("main", option, v, sizeof(v)))
+	if (uci_get_section("main", option, v, sizeof(v)))
 		return fallback;
 	if (!strcmp(v, "1") || !strcmp(v, "true") || !strcmp(v, "yes") ||
 	    !strcmp(v, "on"))
