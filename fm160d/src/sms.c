@@ -510,7 +510,16 @@ void fm160_parse_cmgr(const char *resp, int index, const char *storage)
 			  index);
 		return;
 	}
-	p = strstr(resp, "+CMGR");
+	/* Line-start search, like fm160_parse_cmgl: a bare strstr also hits
+	 * the echoed command ("AT+CMGR=2" contains "+CMGR"), and the "PDU"
+	 * cut from that line is the header itself - parse_hex then fails on
+	 * the '+' and the message is lost with "not hexadecimal". */
+	p = resp;
+	while ((p = strstr(p, "+CMGR")) != NULL) {
+		if (p == resp || p[-1] == '\n')
+			break;
+		p++;
+	}
 	nl = p ? strchr(p, '\n') : NULL;
 	if (!nl) {
 		fm160_log(LOG_DEBUG, "index %d: the header had no PDU line after it",
@@ -801,6 +810,24 @@ static void setup_step_cb(struct at_req *req, enum at_status st,
 	default:
 		return;
 	}
+}
+
+void fm160_sms_setup_reset(void)
+{
+	/* A (re)ident run means the module may be a different physical device -
+	 * or the same one after AT+CFUN / a flash, which quietly puts CNMI back
+	 * to 0,0,0,0,0 and CPMS back to "SM".  Every "armed once, armed forever"
+	 * assumption dies here so the setup state machine re-runs and re-arms
+	 * the new module.  In-flight setup transactions belonged to the old
+	 * port and are already dead (the at-daemon lease was lost with it), so
+	 * clearing the step counter cannot strand a live callback that would
+	 * resurrect setup_done with only half the arming done. */
+	g_state.sms.setup_done = false;
+	g_state.sms.setup_running = false;
+	g_state.sms.cmgf = -1;         /* the mode cache described the old module */
+	setup_step = 0;
+	setup_tries = 0;
+	setup_next_ms = 0;
 }
 
 void fm160_sms_setup_tick(void)
@@ -1193,7 +1220,12 @@ bool fm160_sms_handle_urc(const char *line)
 					n = sizeof(storage) - 1;
 				memcpy(storage, q + 1, n);
 				storage[n] = '\0';
-				index = atoi(e + 1);
+				/* e points at the CLOSING quote, so e + 1 is ",12":
+				 * atoi() stops at the comma and would silently
+				 * return 0 - every +CMTI would fetch message 0
+				 * and the real one would stay unread.  Skip the
+				 * separator before converting. */
+				index = atoi(e + 1 + strspn(e + 1, " ,\t"));
 			}
 		}
 		fm160_log(LOG_INFO, "new message announced: %s", line);
@@ -1215,7 +1247,9 @@ bool fm160_sms_handle_urc(const char *line)
 			}
 			fm160_cmd_sms_fetch(index);
 		}
-		g_state.sms.st.unread++;
+		/* No unread bump here: the count is kept by the fetch path
+		 * when the PDU is actually stored, and bumping at announce
+		 * time too double-counts every delivered message. */
 		fm160_state_mark_dirty();
 		return true;
 	}

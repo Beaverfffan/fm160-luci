@@ -1113,6 +1113,12 @@ void fm160_sms_init(void);
  * succeeded, and backs off after a refusal instead of retrying into a modem
  * that has already said no. */
 void fm160_sms_setup_tick(void);
+/* Invalidate the SMS setup so it re-arms.  Must be called whenever the
+ * module is (re)identified: a module reset - AT+CFUN, a flash, a power cycle
+ * - silently puts CNMI back to 0,0,0,0,0 and CPMS back to "SM", and the
+ * cached "setup_done" flag would otherwise keep the daemon from ever
+ * re-arming the new module (+CMTI never arrives again). */
+void fm160_sms_setup_reset(void);
 bool fm160_sms_usable(void);
 
 /* Pull the messages the modem is holding.  Priority 1, opens the SMS quiet

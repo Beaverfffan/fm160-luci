@@ -771,6 +771,11 @@ void fm160_cmd_ident_start(void)
 {
 	ident_step = 0;
 	fm160_ident_reset();
+	/* The SMS arming (CMGF/CPMS/CNMI) belongs to the module we are about
+	 * to (re)read, not to whichever module answered last: a reset or a
+	 * reflash silently defaults CNMI/CPMS, and setup_done would otherwise
+	 * freeze the arming forever. */
+	fm160_sms_setup_reset();
 	fm160_log(LOG_INFO, "reading module identity");
 	ident_next();
 }

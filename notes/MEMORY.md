@@ -116,6 +116,20 @@
       5 s 内 act=7 且数据呼叫未断。★ 原值必须先记全：
       `20,6,3,1,8,101,103,105,108,134,138,139,140,141,501,5028,5041,5078,5079`
 
+42. ★★★★ FM160 插件短信链路**真机验收通过**（`89614.1000.00.04.01.23`，`2026-09-22.md` §17）：
+    收发双向、中文/全角标点逐字正确、+CMTI 实时秒级入库、CFUN 复位后 daemon 自动重布防。
+    三个历史 bug 已修：① ident 时 `fm160_sms_setup_reset()` 作废布防缓存；② `+CMTI` 索引
+    `atoi(e+1)` 遇 `",N"` 逗号返回 0（**接收路径从未工作过的根因**）；③ `parse_cmgr` 裸 `strstr`
+    命中命令回显 `AT+CMGR=2` 把头部当 PDU（报 `not hexadecimal`）⇒ 解析响应用**行首守卫**
+    （`fm160_resp_find`/`parse_cmgl` 同款），别用裸 strstr；④ unread 通知/入库双计数删其一。
+    ★ 新固件差异：**无 SIM 时 CPMS/CMGL 全裸 ERROR**（先查 SIM 别怀疑代码）；**热插 SIM 需
+    `CFUN=1,1` 才识别**；★ daemon `at` 方法每次手动探针开 **10 s 静默窗**压住后台布防——
+    验收时忍住不探，隔 60–90 s 看 `ubus call fm160 status`。
+43. ★★★ 构建树 `package/fm160d` 与 git HEAD 比对法（防未跟踪副本被覆盖丢改动）：
+    本地 `git archive HEAD fm160d | gzip` 上传解压成参考目录，`diff -r --strip-trailing-cr`
+    对树副本——本次实测树里有 HEAD 没有的死代码 `modesw.c:copy_str()`（无调用点，无害留待清理），
+    CRLF 会让 diff 显示整文件不同，**必须 `--strip-trailing-cr`** 再看。
+
 ## 索引（完整结论见存档）
 - 构建/源码树 `beaver@192.168.15.157`（IP 会变）、密钥须全盘符、`make -j12` 挂 tmux 〔§1–2〕
 - 硬件/网络 BE14000 2GB；⚠️ 端口互换 `wan`=`lan8`(MT7530)、万兆口属 `br-lan`；natflow `995-0001` ⇒ `mtk_ppe*.c` 不编译 〔§3–4〕
@@ -131,4 +145,5 @@
 - **FM160 短信层**〔`2026-09-22.md` §13`–`14〕★ **制式是自变量**（NR SA ~100 ms 本地秒拒 / LTE 40 s T1_RP）；★ 卡侧能力用 **EF_SMSP↔`AT+CSCA?` 跨来源自证**排除；★ **CN 版固件无任何 IMS 状态命令**（`AT+CLAC` = 裸 `OK`；`+CAVIMS` 是**存量**标志）⇒ "等 IMS 注册 URC"流程不可执行；★ **语音对照** `ATD` 停在 `stat=2` = 无语音承载 ⇒ 数据通+语音死+短信死 = 一个根因面；★ ims PDP 未激活（`+CGACT: 2,0`、`+GTMPDN: 0`）；判据 `_tools/istoreos-h69k/out/SMS-VERDICT-2026-09-22.txt`
 - 门禁/CI〔§43–44〕`fm160-luci` 本地跑法：`NODE=… PY=… LUCI=_tmp/master-luci sh tools/check.sh`；★ 全绿靠四修（i18n 池子 / cccheck 失败自证 / 删死代码 / `$( (`）；★ 本机 `sh`=bash 而 runner=dash ⇒ 改任何 `.sh` 都要 `dash -n` 过一遍
 - FM160 短信〔`2026-09-22.md` §1–11〕★ **制式是自变量**：NR SA = `AT+CMGS` 本地 ~90 ms 秒拒；LTE = 提交下去 + **40 s T1_RP** 无应答（`ERROR` @ 40010 ms）；★ 我们这侧无罪（编码/长度/两阶段/SMSC 字段逐项自证，`CMGW` 同字节收下）；★ `+CSMS: 0,1,1,1` 模组自报支持 MO；★ 文本模式（mcuzone 参考）与 PDU 模式在两种制式下**结果相同**；★ 拨号两制式都停在 `dialing`；★ `AT+GTACT=2` = LTE only（持久、立即生效）；★ 工具 `sms_pdu_ref.py`（先算后发）+ 探针 260–280
+- FM160 短信插件层验收+三修〔§42，`2026-09-22.md` §17〕；构建树 vs HEAD 比对法〔§43〕
 - 面板/Doom 背光亮无画面先量 `…/spi0/statistics/bytes`（LVGL/DRM +153.6k；`/dev/fb0` 假信号）；调面板不刷固件 〔§12–13/15–16〕
