@@ -30,8 +30,11 @@ fi
 
 # 3. 关反向路由（原厂 FAQ 5.7.1 / 7.x：多路网卡 ping 不通的解法）
 echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null || true
-for i in $(seq 1 "$QMAP_N"); do
-	echo 0 > "/proc/sys/net/ipv4/conf/wwan0.$i/rp_filter" 2>/dev/null || true
+i=1
+while [ "$i" -le "$QMAP_N" ]; do
+	f="/proc/sys/net/ipv4/conf/wwan0.$i/rp_filter"
+	[ -e "$f" ] && echo 0 > "$f" 2>/dev/null
+	i=$((i + 1))
 done
 
 # 4. 逐路拨号：第 1 路设置 APN 并双栈，其余路用模块预置 PDP
