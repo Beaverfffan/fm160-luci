@@ -104,6 +104,30 @@
 # netfilter needs no rule at all, because nothing is translated any more.
 #
 # ---------------------------------------------------------------------------
+# THE ROUTER'S OWN ADDRESS NEEDS ONE PROXY ENTRY
+# ---------------------------------------------------------------------------
+#
+# The address on br-lan (<prefix>:1::1) is the router's LAN-side address, and
+# the kernel answers neighbour solicitation for it only on br-lan.  The module,
+# however, resolves it over the mobile link - and when it does, the reply
+# packets for anything the router itself sent (its source selection happily
+# picks the br-lan address) die right there.  Measured 2026-09-22 on firmware
+# .23 with tcpdump on the mobile link:
+#
+#   ICMP6, neighbor solicitation,  who has 240e:...:1::1   <- module, x5
+#   (nothing ever answers)
+#
+# while LAN clients kept working, because odhcpd's ndp relay answers for them.
+# So the router's own address gets exactly one proxy neighbour entry on the
+# mobile device (plus the proxy_ndp sysctl that entry needs to be answered):
+#
+#   ip neigh add proxy <prefix>:1::1 dev usb0
+#
+# This is NOT the rejected per-client proxy scheme - it is one static entry
+# for the one address this script itself put on the bridge, added and removed
+# strictly in step with that address.
+#
+# ---------------------------------------------------------------------------
 # WHAT IT DOES NOT TOUCH
 # ---------------------------------------------------------------------------
 #
@@ -483,6 +507,27 @@ wan_route_cleanup() {
 	return 0
 }
 
+# The proxy entry that lets the module resolve the router's own LAN address;
+# see the header.  One address, on the mobile device only, created and
+# destroyed strictly in step with the bridge address it stands for.  Both
+# helpers are total: every caller runs under set -e and a duplicate add or a
+# missing delete must not abort an apply.
+proxy_add() {
+	local addr="$1" dev="$2"
+	[ -n "$addr" ] && [ -n "$dev" ] || return 0
+	[ -e "/proc/sys/net/ipv6/conf/$dev" ] || return 0
+	sysctl -qw "net.ipv6.conf.$dev.proxy_ndp=1" 2>/dev/null || true
+	ip neigh add proxy "$addr" dev "$dev" 2>/dev/null || true
+	return 0
+}
+
+proxy_del() {
+	local addr="$1" dev="$2"
+	[ -n "$addr" ] && [ -n "$dev" ] || return 0
+	ip neigh del proxy "$addr" dev "$dev" 2>/dev/null || true
+	return 0
+}
+
 apply() {
 	local dev lan pfx old pfx6 gw6 wanseg lannet
 
@@ -506,6 +551,7 @@ apply() {
 		old="$(state_prefix)"
 		if [ -n "$old" ]; then
 			log "operator prefix is gone; withdrawing $old::/64 from $lan"
+			proxy_del "$old:1::1" "$(state_wandev)"
 			remove_prefix "$old" "$lan"
 			state_clear
 		fi
@@ -545,6 +591,12 @@ apply() {
 			# apply that notices, which is also the upgrade path.
 			[ -n "$(state_wandev)" ] || state_set "$pfx" "$dev"
 
+			# The router-address proxy belongs to this same "already
+			# installed" check: an install made before it existed has
+			# the address and no proxy, and router-originated v6 keeps
+			# blackholing until something puts it back.
+			proxy_add "$pfx:1::1" "$dev"
+
 			wanseg="$(net_seg_for "$dev" 2>/dev/null || echo '')"
 			lannet="$(net_seg_for "$lan" 2>/dev/null || echo '')"
 			if [ -n "$wanseg" ]; then
@@ -558,6 +610,7 @@ apply() {
 
 	if [ -n "$old" ] && [ "$old" != "$pfx" ]; then
 		log "operator prefix changed $old -> $pfx"
+		proxy_del "$old:1::1" "$(state_wandev)"
 		remove_prefix "$old" "$lan"
 	fi
 
@@ -581,6 +634,7 @@ apply() {
 	fi
 
 	state_set "$pfx" "$dev"
+	proxy_add "$gw6" "$dev"
 
 	# odhcpd picks the address up off netlink by itself and starts advertising
 	# it.  What it cannot guess is that it should also answer neighbour
@@ -601,6 +655,7 @@ teardown() {
 	lan="$(lan_dev)"
 	old="$(state_prefix)"
 	if [ -n "$old" ]; then
+		proxy_del "$old:1::1" "$(state_wandev)"
 		remove_prefix "$old" "$lan"
 		state_clear
 		log "removed $old::/64 from $lan"
@@ -698,6 +753,7 @@ withdraw() {
 	fi
 
 	remove_prefix "$old" "$lan"
+	proxy_del "$old:1::1" "$(state_wandev)"
 	state_clear
 	log "withdrew $old::/64 from $lan; the mobile link is going down"
 	return 0
@@ -731,6 +787,12 @@ status() {
 		printf 'route learning %s\n' "${learn:-unset (default is on)} -- host routes will land on $dev and break the LAN"
 	fi
 	printf 'stray /128s    %s\n' "$(ip -6 route show 2>/dev/null | grep "^${pfx}:" | grep "dev $dev" | grep -v '/' | wc -l)"
+	if [ -n "$old" ] && [ -n "$wandev" ] && \
+	   ip -6 neigh show proxy dev "$wandev" 2>/dev/null | grep -q "${old}:1::1"; then
+		printf 'router proxy   %s\n' "present on $wandev"
+	else
+		printf 'router proxy   %s\n' "absent - router-originated v6 will blackhole"
+	fi
 	printf 'odhcpd section %s\n' "$(uci -q show "dhcp.$ODHCPD_SEG" 2>/dev/null | tr '\n' ' ' | cut -c1-150)"
 	return 0
 }

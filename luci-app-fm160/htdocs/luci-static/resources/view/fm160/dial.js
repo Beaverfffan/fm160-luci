@@ -610,6 +610,7 @@ return view.extend({
 			var op = prefixField(st, 'operator /64');
 			var inst = prefixField(st, 'installed');
 			var relay = prefixField(st, 'odhcpd relay');
+			var proxy = prefixField(st, 'router proxy');
 
 			rows.push(row(_('Link'), op ?
 				E('span', {}, op) :
@@ -622,6 +623,10 @@ return view.extend({
 			rows.push(row(_('Home-side lookup'), relay === 'relay' ?
 				E('span', {}, _('odhcpd relays neighbour discovery for the LAN')) :
 				E('span', { 'class': 'hint' }, _('not configured - inbound connections would not resolve'))));
+
+			rows.push(row(_('Router address'), /present/.test(proxy || '') ?
+				E('span', {}, _('the module can resolve the router\'s own LAN address')) :
+				E('span', { 'class': 'hint' }, _('not proxied - IPv6 traffic the router itself originates would blackhole'))));
 		}
 
 		return section(_('LAN IPv6'), [

@@ -1140,6 +1140,18 @@ msgid "not configured - inbound connections would not resolve"
 msgstr "未配置——外部主动连接将无法解析"
 
 #: view/fm160/dial.js
+msgid "Router address"
+msgstr "路由器自身地址"
+
+#: view/fm160/dial.js
+msgid "the module can resolve the router's own LAN address"
+msgstr "模组可以解析路由器在 LAN 侧的地址"
+
+#: view/fm160/dial.js
+msgid "not proxied - IPv6 traffic the router itself originates would blackhole"
+msgstr "未代理——路由器自身发起的 IPv6 流量会黑洞"
+
+#: view/fm160/dial.js
 msgid "LAN IPv6"
 msgstr "LAN IPv6"
 
