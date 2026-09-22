@@ -210,6 +210,10 @@ have_addr6() { [ -n "$(ip -6 -o addr show "$IF" 2>/dev/null | grep -v ' fe80::' 
 #   但 ping 100% loss、`rx_bytes` 恒 0、dmesg 无任何报错。
 # ⇒ 这个坑必须**主动检测并自愈**，否则表现为「拨号成功但完全不通」。
 ensure_qmap_mode() {
+	if [ ! -d /sys/module/qmi_wwan_f ]; then
+		log "开源驱动 stock qmi_wwan：无 QMAP 概念，跳过 qmap_mode 检查"
+		return 0
+	fi
 	_qm=$(cat /sys/module/qmi_wwan_f/parameters/qmap_mode 2>/dev/null)
 	[ "$_qm" = "1" ] && return 0
 	log "★ 驱动 qmap_mode=${_qm:-未知}（必须为 1）⇒ 以 qmap_mode=1 重新加载"
@@ -458,6 +462,22 @@ do_up() {
 	wait_qmi || { log "等不到 QMI 就绪（$D / $IF，${WAITSEC}s 超时）"; return 1; }
 	release_readers
 
+	# 0) 幂等守卫：链路已在位且健康 ⇒ 不重建。
+	#    背景（2026-09-22 开源栈固件首测）：procd 可能同时拉起第二个 watch 实例
+	#    （如网络配置变更触发服务重启），新实例的 do_up 从 ifdown 开始把正在
+	#    工作的链路拆掉重拨。这里先体检，健康就直接返回。
+	if [ -s "$CIDF" ] && [ -s "$PDF" ]; then
+		_oc=$(cat "$CIDF")
+		case "$(q "$_oc" --get-data-status 2>/dev/null)" in
+			*'"connected"'*)
+				if [ "$(cat "$S/carrier" 2>/dev/null)" = "1" ] && have_addr; then
+					log "链路已在位（cid=$_oc pdh=$(cat "$PDF")），跳过重建"
+					ifup "$NETIF" 2>/dev/null
+					return 0
+				fi ;;
+		esac
+	fi
+
 	# 1) WDS client（会话绑在它上面）
 	_cid=$(get_cid) || return 1
 	echo "$_cid" > "$CIDF"
@@ -473,15 +493,27 @@ do_up() {
 	#    只调 BIND_MUX 不够；必须先把聚合显式设成 qmap。
 	#
 	#    好消息：uqmi 的 --wda-set-data-format **原生带聚合选项**，无需打补丁。
-	_n=$(qretry 5 - --wda-set-data-format raw-ip \
-		--ul-aggregation-protocol qmap --dl-aggregation-protocol qmap \
-		--ul-datagram-max-count "$ULMAX" --ul-datagram-max-size "$ULSIZE" \
-		--dl-datagram-max-count "$DLMAX" --dl-datagram-max-size "$DLSIZE")
+	#
+	#    ★ 聚合选项**只在厂商驱动 qmi_wwan_f 下才能加**（2026-09-22 开源栈首测）：
+	#      stock qmi_wwan 没有 QMAP 解封装，若让模组把下行包 QMAP 封装，驱动
+	#      原样上交 ⇒ 内核收到带 12 字节 QMAP 头的垃圾帧，DHCP 永远无应答；
+	#      且真机实测 QMI 服务会在持续无效下行流量中崩溃。stock 驱动下只设裸
+	#      raw-ip（不加任何聚合字段）。
+	if [ -d /sys/module/qmi_wwan_f ]; then
+		_n=$(qretry 5 - --wda-set-data-format raw-ip \
+			--ul-aggregation-protocol qmap --dl-aggregation-protocol qmap \
+			--ul-datagram-max-count "$ULMAX" --ul-datagram-max-size "$ULSIZE" \
+			--dl-datagram-max-count "$DLMAX" --dl-datagram-max-size "$DLSIZE")
+		_fmtdesc="raw-ip + ul/dl=qmap, $ULMAX/$ULSIZE, $DLMAX/$DLSIZE"
+	else
+		_n=$(qretry 5 - --wda-set-data-format raw-ip)
+		_fmtdesc="raw-ip（stock qmi_wwan，无聚合）"
+	fi
 	case "$_n" in
 		*error* | *Error* | *ERROR* | *timed* | *not* | *failed*)
 			log "SET_DATA_FORMAT 异常（已重试）: $(printf '%s' "$_n" | tr '\n' ' ')" ;;
 		*)
-			log "SET_DATA_FORMAT ok (raw-ip + ul/dl=qmap, $ULMAX/$ULSIZE, $DLMAX/$DLSIZE)" ;;
+			log "SET_DATA_FORMAT ok ($_fmtdesc)" ;;
 	esac
 	sleep 1
 
@@ -509,7 +541,18 @@ do_up() {
 	#     进而错误回退到 --apn，报一串 "No effect"（本项目踩过，见存档 §35）。
 	#   也绝不要去匹配 `"pdh":` 标签 —— uqmi 这条命令根本不输出 JSON 标签。
 	_pdh=$(printf '%s\n' "$_sn" | grep -E '^-?[0-9]+$' | tail -1)
-	[ -n "$_pdh" ] || { log "start-network 失败: $(printf '%s' "$_sn" | tr '\n' ' ')"; return 1; }
+	if [ -z "$_pdh" ]; then
+		# 「No effect」= 该 client 上已有活跃会话（如前一个实例没来得及停链路
+		# 就被 kill）。此时不判失败——收养现有会话，继续走 5)–7) 拿地址。
+		case "$_sn" in
+			*'No effect'*)
+				log "start-network: No effect（会话已存在）⇒ 收养现有会话继续"
+				_pdh="existing" ;;
+			*)
+				log "start-network 失败: $(printf '%s' "$_sn" | tr '\n' ' ')"
+				return 1 ;;
+		esac
+	fi
 	echo "$_pdh" > "$PDF"
 	log "start-network ok, pdh=$_pdh"
 
@@ -646,11 +689,18 @@ do_watch() {
 	_fail=0
 	log "进入守护模式（每 ${HEALTH}s 健康检查）"
 	do_up || log "首次起链路未完成，进入重试"
+	# DHCP 获取宽限：模组应答 DHCP 要 20–60s（见 do_up 第 7 步注释），
+	# 而健康检查 3×${HEALTH}s 就会触发拆链重拨——宽限期内失败不计数，
+	# 否则每次都把刚到手的 lease 掐死在摇篮里（2026-09-22 开源栈首测实测）。
+	_grace=$(( $(date +%s) + DHCPWAIT ))
 	while :; do
 		sleep "$HEALTH"
 		if healthy; then
 			_fail=0
 		else
+			if [ "$(date +%s)" -lt "$_grace" ]; then
+				continue
+			fi
 			_fail=$((_fail + 1))
 			log "健康检查失败 $_fail/3"
 			if [ "$_fail" -ge 3 ]; then
@@ -659,6 +709,7 @@ do_watch() {
 				sleep 2
 				do_up
 				_fail=0
+				_grace=$(( $(date +%s) + DHCPWAIT ))
 			fi
 		fi
 	done
@@ -668,7 +719,11 @@ do_watch() {
 CMD=${1:-status}
 case "$CMD" in
 	up)
-		if holding; then log "已有实例在跑（pid $(cat "$LOCK")），跳过"; exit 0; fi
+		if ! mkdir /tmp/fm160-qmi.uplock 2>/dev/null; then
+			log "已有实例在跑，跳过"
+			exit 0
+		fi
+		trap 'rmdir /tmp/fm160-qmi.uplock' EXIT INT TERM
 		do_up
 		;;
 	down)
@@ -678,9 +733,12 @@ case "$CMD" in
 		do_status
 		;;
 	watch)
-		if holding; then log "已有守护实例在跑（pid $(cat "$LOCK")），退出"; exit 0; fi
-		echo $$ > "$LOCK"
-		trap 'rm -f "$LOCK"' EXIT INT TERM
+		# mkdir 原子锁：文件锁存在“读后写入”竞态，两个实例会互相覆盖共存
+		if ! mkdir /tmp/fm160-qmi.watchlock 2>/dev/null; then
+			log "已有守护实例在跑，退出"
+			exit 0
+		fi
+		trap 'rmdir /tmp/fm160-qmi.watchlock' EXIT INT TERM
 		do_watch
 		;;
 	*)
