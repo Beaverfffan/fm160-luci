@@ -1,13 +1,21 @@
 #!/bin/sh
 # FM160 原厂 MBIM 拨号（复刻 Fibocom ECM&NCM&RNDIS&MBIM 拨号集成指导 V1.8 §5.5）
 # 前置：模块已切 MBIM 模式（GTUSBMODE 30），cdc_mbim 驱动已枚举 wwan0 + /dev/cdc-wdm0
-# 用法：mbim-up.sh [APN]     默认 ctnet
+# 用法：mbim-up.sh [APN] [ip-type: ipv4v6|ipv4|ipv6]     默认 ctnet、ipv4v6
 set -e
 APN=${1:-ctnet}
+IPTYPE=${2:-ipv4v6}
 DEV=/dev/cdc-wdm0
 IF=wwan0
 LOG=/var/log/vendor-mbim.log
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+
+# 0. 清场：QMAP 残留的 fibo_qmimsg_server 独占 cdc-wdm0 并向 MBIM 通道灌 QMI 报文，
+#    会把模组侧 MBIM 端点打挂（2026-09-23 实测，需 USB 模式弹跳才能恢复），必须先杀干净
+killall fibo_qmimsg_server 2>/dev/null && log "杀掉残留的 fibo_qmimsg_server"
+pkill -f fibocom-dial 2>/dev/null || true
+killall mbim-proxy 2>/dev/null || true
+sleep 2
 
 [ -c "$DEV" ] || { log "$DEV 不存在"; exit 1; }
 ip link set "$IF" up 2>/dev/null || true
@@ -17,9 +25,9 @@ log "查询订阅者就绪状态"
 mbimcli -p -d "$DEV" --query-subscriber-ready-status >>"$LOG" 2>&1 || {
 	log "subscriber-ready 失败，模块未就绪"; exit 1; }
 
-# 2. 拨号（等同文档步骤 2，双栈 APN）
-log "发起 MBIM 连接 apn=$APN"
-mbimcli -p -d "$DEV" --connect="session-id=0,apn=$APN" >>"$LOG" 2>&1 || {
+# 2. 拨号（等同文档步骤 2，ip-type 决定 v4/v6/双栈）
+log "发起 MBIM 连接 apn=$APN ip-type=$IPTYPE"
+mbimcli -p -d "$DEV" --connect="session-id=0,apn=$APN,ip-type=$IPTYPE" >>"$LOG" 2>&1 || {
 	log "connect 失败"; exit 1; }
 
 # 3. 把拿到的 IP 配到网卡（复刻 mbim-set-ip）

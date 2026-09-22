@@ -1,0 +1,181 @@
+#!/bin/sh
+# fm160-dial-ctl - unified control for the three FM160 dial paths
+#   ECM  (usb0, fm160d AT dial)  |  QMAP (wwan0, fibocom-dial)  |  MBIM (wwan0, mbimcli)
+# Usage:
+#   fm160-dial-ctl status           -> JSON snapshot (settings + modem + link)
+#   fm160-dial-ctl set <key> <val>  -> validated write to /etc/config/fm160
+#   fm160-dial-ctl up|down          -> dial / hang up
+# Keys: dial_mode(ecm|qmap|mbim) dial_apn dial_v4(0|1) dial_v6(0|1)
+#       qmap_channels(1-4) dial_autostart(0|1) lan_ipv6(0|1)
+. /lib/functions.sh
+CFG=fm160
+
+log() { logger -t fm160-dial-ctl "$*"; }
+
+ucig() { uci -q get "$CFG".main."$1"; }
+ucis() { uci set "$CFG".main."$1=$2" >/dev/null; }
+uci_commit() { uci commit "$CFG"; }
+
+jstr() { printf '"%s"' "$(echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+
+# ── validation ─────────────────────────────────────────────────────────────
+valid_mode()    { case "$1" in ecm|qmap|mbim) return 0;; esac; return 1; }
+valid_apn()     { case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; return 0; }
+valid_bool()    { [ "$1" = 0 ] || [ "$1" = 1 ]; }
+valid_channels(){ [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 4 ] 2>/dev/null; }
+
+# ── derived values ─────────────────────────────────────────────────────────
+mode()     { ucig dial_mode || echo ecm; }
+apn()      { ucig dial_apn; }
+v4()       { ucig dial_v4 || echo 1; }
+v6()       { ucig dial_v6 || echo 1; }
+channels() { ucig qmap_channels || echo 1; }
+autostart(){ ucig dial_autostart || echo 0; }
+lanv6()    { ucig lan_ipv6; }
+usbmode_for() { case "$1" in ecm) echo 33;; qmap) echo 32;; mbim) echo 30;; esac; }
+pdp_for() {
+	[ "$(v4)" = 1 ] && [ "$(v6)" = 1 ] && { echo IPV4V6; return; }
+	[ "$(v6)" = 1 ] && { echo IPV6; return; }
+	echo IP
+}
+stack_args() {  # fibocom-dial -4/-6 flags
+	local o=
+	[ "$(v4)" = 1 ] && o="$o -4"
+	[ "$(v6)" = 1 ] && o="$o -6"
+	echo "$o"
+}
+mbim_iptype() { pdp_for | tr 'A-Z' 'a-z'; }
+ifname_for() { [ "$1" = ecm ] && echo usb0 || echo wwan0; }
+
+# ── modem helpers ──────────────────────────────────────────────────────────
+usb_mode() { ubus call fm160 status 2>/dev/null | grep '"usb_mode"' | grep -o '[0-9]*'; }
+
+ensure_usb_mode() {
+	local want="$1" cur i
+	cur=$(usb_mode)
+	[ "$cur" = "$want" ] && return 0
+	log "usb mode $cur -> $want"
+	ubus call fm160 setusbmode "{\"mode\":$want}" >/dev/null 2>&1
+	i=0
+	while [ $i -lt 45 ]; do
+		sleep 4; i=$((i+1))
+		[ -c /dev/cdc-wdm0 ] || continue
+		cur=$(usb_mode)
+		[ "$cur" = "$want" ] && { sleep 4; return 0; }
+	done
+	log "usb mode switch to $want timed out"
+	return 1
+}
+
+# ── network interface visibility (LuCI 网络 → 接口) ────────────────────────
+netif_sync() {
+	local m="$1" ifname dev proto
+	ifname=$(ifname_for "$m")
+	if [ "$m" = ecm ]; then proto=dhcp; dev=usb0; else proto=none; dev=wwan0; fi
+	if ! uci -q get network.fm160 >/dev/null 2>&1; then
+		uci set network.fm160=interface
+	fi
+	uci set network.fm160.proto="$proto"
+	uci set network.fm160.device="$dev"
+	uci set network.fm160.metric='40'
+	uci commit network
+	/etc/init.d/network reload >/dev/null 2>&1
+}
+
+# ── v6-only completion (fibocom-dial quirk: no default route / no DNS) ─────
+v6_fix() {
+	[ "$(v6)" = 1 ] && [ "$(v4)" = 0 ] || return 0
+	local gw dns
+	sleep 8
+	gw=$(grep 'IPv6 Gateway' /var/log/vendor-qmap.log 2>/dev/null | tail -1 | awk '{print $NF}' | tr -d '\r')
+	[ -n "$gw" ] && ip -6 route replace default via "$gw" dev wwan0 2>/dev/null
+	dns=$(grep 'IPv6 DNS1' /var/log/vendor-qmap.log 2>/dev/null | tail -1 | cut -d"'" -f2 | tr -d '\r')
+	case "$dns" in
+		*:*)
+			grep -q "nameserver $dns" /etc/resolv.conf 2>/dev/null || \
+				echo "nameserver $dns" >> /etc/resolv.conf ;;
+	esac
+}
+
+# ── actions ────────────────────────────────────────────────────────────────
+do_up() {
+	local m=$(mode) a=$(apn)
+	[ -n "$a" ] || { echo '{"ok":false,"error":"APN empty"}'; return 1; }
+	ensure_usb_mode "$(usbmode_for "$m")" || { echo '{"ok":false,"error":"usb mode switch failed"}'; return 1; }
+	case "$m" in
+		ecm)
+			ubus call fm160 dial_config "{\"apn\":\"$a\",\"pdp\":\"$(pdp_for)\",\"cid\":1}" >/dev/null 2>&1
+			ubus call fm160 dial_start >/dev/null 2>&1 ;;
+		qmap)
+			ST=46; [ "$(v4)" = 0 ] && ST=6; [ "$(v6)" = 0 ] && ST=4
+			qmap-up.sh "$(channels)" "$a" "$ST" >/dev/null 2>&1 &
+			( sleep 40; v6_fix ) >/dev/null 2>&1 &
+			# ifup 事件触发 fm160-prefix 时拨号还没配好 IP，延后重刷一次
+			( sleep 50; /etc/init.d/fm160-prefix reload ) >/dev/null 2>&1 & ;;
+		mbim)
+			mbim-up.sh "$a" "$(mbim_iptype)" >/dev/null 2>&1 &
+			( sleep 20; /etc/init.d/fm160-prefix reload ) >/dev/null 2>&1 & ;;
+	esac
+	netif_sync "$m"
+	echo '{"ok":true}'
+}
+
+do_down() {
+	case "$(mode)" in
+		ecm)  ubus call fm160 dial_stop >/dev/null 2>&1 ;;
+		qmap) qmap-down.sh >/dev/null 2>&1 ;;
+		mbim) mbim-down.sh >/dev/null 2>&1 ;;
+	esac
+	# proto none 的 fm160 接口不产生 ifdown 事件，主动收回 LAN 侧运营商前缀
+	/etc/init.d/fm160-prefix withdraw >/dev/null 2>&1
+	echo '{"ok":true}'
+}
+
+# ── status ─────────────────────────────────────────────────────────────────
+do_status() {
+	local m=$(mode) ifname up v4a v6a rx tx
+	ifname=$(ifname_for "$m")
+	if ip link show "$ifname" 2>/dev/null | grep -q 'UP,LOWER_UP\|LOWER_UP'; then
+		up=1; else up=0; fi
+	v4a=$(ip -4 -br a show "$ifname" 2>/dev/null | awk '{print $3}' | cut -d/ -f1 | head -1)
+	v6a=$(ip -6 -br a show "$ifname" scope global 2>/dev/null | awk '{print $3}' | cut -d/ -f1 | head -1)
+	rx=$(cat "/sys/class/net/$ifname/statistics/rx_bytes" 2>/dev/null || echo 0)
+	tx=$(cat "/sys/class/net/$ifname/statistics/tx_bytes" 2>/dev/null || echo 0)
+	cat <<EOF
+{
+ "mode": $(jstr "$m"), "apn": $(jstr "$(apn)"),
+ "pdp": "$(pdp_for)", "v4": $(v4), "v6": $(v6), "channels": $(channels),
+ "autostart": $(autostart), "lan_ipv6": "$(lanv6)",
+ "usb_mode": "$(usb_mode)",
+ "netif": $(uci -q get network.fm160.proto >/dev/null 2>&1 && echo true || echo false),
+ "netif_proto": "$(uci -q get network.fm160.proto 2>/dev/null)",
+ "link": {"up": $up, "ifname": "$ifname",
+          "v4": $(jstr "$v4a"), "v6": $(jstr "$v6a"),
+          "rx": $rx, "tx": $tx}
+}
+EOF
+}
+
+# ── entry ──────────────────────────────────────────────────────────────────
+CMD=$1; shift 2>/dev/null
+case "$CMD" in
+	status) do_status ;;
+	set)
+		K=$1; V=$2
+		case "$K" in
+			dial_mode)     valid_mode "$V"     || { echo '{"ok":false,"error":"bad mode"}'; exit 1; } ;;
+			dial_apn)      valid_apn "$V"      || { echo '{"ok":false,"error":"bad apn"}'; exit 1; } ;;
+			dial_v4|dial_v6|dial_autostart|lan_ipv6)
+					valid_bool "$V"     || { echo '{"ok":false,"error":"bad bool"}'; exit 1; } ;;
+			qmap_channels) valid_channels "$V" || { echo '{"ok":false,"error":"bad channels"}'; exit 1; } ;;
+			*) echo '{"ok":false,"error":"unknown key"}'; exit 1 ;;
+		esac
+		ucis "$K" "$V"; uci_commit
+		# keep ECM pdp in sync when the stack toggles change it
+		ucis dial_pdp "$(pdp_for)"
+		uci_commit
+		echo '{"ok":true}' ;;
+	up)   do_up ;;
+	down) do_down ;;
+	*) echo "usage: $0 {status|set <key> <val>|up|down}" >&2; exit 2 ;;
+esac

@@ -2,13 +2,26 @@
 # FM160 原厂 QMAP 拨号（复刻 Fibocom QMI&Gobinet 拨号指南 V1.7 §6.5.2）
 # 前置：模块已在 QMI 模式（GTUSBMODE 32），qmi_wwan_f 驱动已枚举 wwan0 + /dev/cdc-wdm0
 # 流程：设 qmap_mode → 起 fibo_qmimsg_server → fibocom-dial 逐路拨号（QMI 直配 IP，无 DHCP）
-# 用法：qmap-up.sh [通道数] [APN]     默认 2 路、APN ctnet
+# 用法：qmap-up.sh [通道数] [APN] [栈: 46|4|6]     默认 2 路、APN ctnet、双栈
 set -e
 
 QMAP_N=${1:-2}
 APN=${2:-ctnet}
+STACK=${3:-46}
+FLAGS=""
+case "$STACK" in
+	*4*) FLAGS="$FLAGS -4" ;;
+esac
+case "$STACK" in
+	*6*) FLAGS="$FLAGS -6" ;;
+esac
+[ -n "$FLAGS" ] || FLAGS=" -4"
 LOG=/var/log/vendor-qmap.log
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+
+# 0. 清场：MBIM 残留的 mbim-proxy 独占 cdc-wdm0，QMAP 的 QMI 代理起不来
+killall mbim-proxy 2>/dev/null && log "杀掉残留的 mbim-proxy"
+sleep 1
 
 [ -d /sys/class/net/wwan0 ] || { log "wwan0 不存在，模块未在 QMI 模式"; exit 1; }
 [ -c /dev/cdc-wdm0 ] || { log "/dev/cdc-wdm0 不存在"; exit 1; }
@@ -37,11 +50,11 @@ while [ "$i" -le "$QMAP_N" ]; do
 	i=$((i + 1))
 done
 
-# 4. 逐路拨号：第 1 路设置 APN 并双栈，其余路用模块预置 PDP
+# 4. 逐路拨号：第 1 路设置 APN，其余路用模块预置 PDP
 i=1
 if ! pidof fibocom-dial >/dev/null 2>&1; then
-	log "第 1 路拨号：fibocom-dial -n 1 -m 1 -4 -6 -s $APN"
-	/usr/bin/fibocom-dial -n 1 -m 1 -4 -6 -s "$APN" >>"$LOG" 2>&1 &
+	log "第 1 路拨号：fibocom-dial -n 1 -m 1$FLAGS -s $APN"
+	/usr/bin/fibocom-dial -n 1 -m 1 $FLAGS -s "$APN" >>"$LOG" 2>&1 &
 	sleep 8
 fi
 i=2

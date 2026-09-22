@@ -7,7 +7,8 @@
 					   "profiles", "diagnostics" ]
 			},
 			"file": {
-				"/usr/libexec/fm160-prefix-lan.sh": [ "exec" ]
+				"/usr/libexec/fm160-prefix-lan.sh": [ "exec" ],
+				"/usr/sbin/fm160-dial-ctl": [ "exec" ]
 			},
 			"uci": [ "fm160" ]
 		},
