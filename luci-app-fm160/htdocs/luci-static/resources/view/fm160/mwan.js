@@ -15,10 +15,13 @@
  * edits the knobs in /etc/config/fm160, section "mwan3", and asks the
  * script for a status snapshot.
  *
- * Priority model (mwan3 native): lower metric = preferred failover path;
- * interfaces with the SAME metric share traffic in proportion to their
- * weight.  So "wired first, mobile as backup, 3:1 when both are up" is
- * wired_metric 10 / wired_weight 3 / mobile_metric 20 / mobile_weight 1.
+ * Priority model (mwan3 native): members of a policy are tiered by metric,
+ * the lowest tier carries ALL traffic and the next tier only takes over
+ * when every member of the tier above is down - that is failover.  Weights
+ * only matter BETWEEN members of the SAME tier: same metric, different
+ * weight = true load balancing.  The defaults are failover on purpose:
+ * wired first (metric 10), mobile as backup (metric 20).  For 3:1 real
+ * balancing set both metrics equal, e.g. 10/3 and 10/1.
  */
 
 var SYNC = '/usr/sbin/fm160-mwan3-sync';
@@ -159,7 +162,7 @@ return view.extend({
 			E('p', { 'class': 'hint' }, [
 				E('strong', {}, _('Lower metric wins failover; equal metrics balance by weight.')),
 				' ',
-				_('With the defaults above, wired eth is the preferred path and the FM160 link is the backup; while both are up, traffic is shared 3:1 (wired:mobile). Interfaces are discovered automatically - wired (device ethN) and the FM160 dial interface (whichever dial mode is active). Everything this feature writes into mwan3 is tagged and cleaned up when the interface disappears or auto-registration is turned off; your own mwan3 sections are never touched.')
+				_('With the defaults above this is FAILOVER, not balancing: wired eth (metric 10) carries all traffic while it is up, and the FM160 link (metric 20) only takes over when wired goes down. Weights apply between members of the same metric tier only - set both classes to the same metric (e.g. 10/3 wired and 10/1 mobile) for true weighted balancing while both are up. Interfaces are discovered automatically - wired (device ethN) and the FM160 dial interface (whichever dial mode is active). Everything this feature writes into mwan3 is tagged and cleaned up when the interface disappears or auto-registration is turned off; your own mwan3 sections are never touched.')
 			]),
 			E('div', { 'class': 'cbi-page-actions', 'style': 'text-align:left' }, [
 				E('button', {

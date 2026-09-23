@@ -79,6 +79,8 @@ msgstr ""
 #: view/fm160/gnss.js
 
 #: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
 msgid "\"In view\" is what the module itself reports, and \"parsed\" is how many of those satellites were actually present in the NMEA. They are shown side by side on purpose: if they differ, the answer was truncated, and that is a transport problem rather than a sky problem."
 msgstr "「可见」是模组自己报告的，而「已解析」是这些卫星里真正出现在 NMEA 中的数量。两者并排显示是有意为之：如果不一致，说明应答被截断了，那是传输问题而不是天空的问题。"
 
@@ -2052,8 +2054,8 @@ msgid "Wired weight"
 msgstr "有线权重"
 
 #: view/fm160/mwan.js
-msgid "With the defaults above, wired eth is the preferred path and the FM160 link is the backup; while both are up, traffic is shared 3:1 (wired:mobile). Interfaces are discovered automatically - wired (device ethN) and the FM160 dial interface (whichever dial mode is active). Everything this feature writes into mwan3 is tagged and cleaned up when the interface disappears or auto-registration is turned off; your own mwan3 sections are never touched."
-msgstr "以上默认值下，有线 eth 是首选路径，FM160 链路是备份；两者都在线时按 3:1（有线:移动）分享流量。接口自动发现——有线（设备 ethN）与 FM160 拨号接口（当前激活的拨号模式）。本功能写入 mwan3 的内容全部带标记，接口消失或关闭自动注册时自动清理；你自己写的 mwan3 配置不会被触碰。"
+msgid "With the defaults above this is FAILOVER, not balancing: wired eth (metric 10) carries all traffic while it is up, and the FM160 link (metric 20) only takes over when wired goes down. Weights apply between members of the same metric tier only - set both classes to the same metric (e.g. 10/3 wired and 10/1 mobile) for true weighted balancing while both are up. Interfaces are discovered automatically - wired (device ethN) and the FM160 dial interface (whichever dial mode is active). Everything this feature writes into mwan3 is tagged and cleaned up when the interface disappears or auto-registration is turned off; your own mwan3 sections are never touched."
+msgstr "以上默认值是**故障转移**而不是分流：有线 eth（metric 10）在线时承担全部流量，有线掉线后 FM160 链路（metric 20）才接管。权重只在同一 metric 层的成员间生效——把两类的 metric 设成相同（例如有线 10/3、移动 10/1）才是双在线时按权重真分流。接口自动发现——有线（设备 ethN）与 FM160 拨号接口（当前激活的拨号模式）。本功能写入 mwan3 的内容全部带标记，接口消失或关闭自动注册时自动清理；你自己写的 mwan3 配置不会被触碰。"
 
 #: view/fm160/gnss.js
 msgid "Write"
