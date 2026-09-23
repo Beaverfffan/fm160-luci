@@ -233,7 +233,7 @@ return view.extend({
 				rows.push([ _(sc.id + ' (CA)'),
 					_('%s, %s MHz, PCI %d, %s').format(
 						sc.band, sc.dlBw !== null ? sc.dlBw : '?', sc.pci,
-						sc.state === 'active' ? _('active') : _('configured')) ]);
+						sc.state === 'active' ? _('active', 'fm160 ca state') : _('configured')) ]);
 			});
 		} else if (pcc) {
 			rows.push([ _('Carrier aggregation'), _('none (PCC only)') ]);

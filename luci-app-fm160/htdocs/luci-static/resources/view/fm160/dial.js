@@ -68,7 +68,7 @@ var KA_STATE = {
 	idle:    _('idle'),
 	running: _('running'),
 	stopped: _('stopped (given up)'),
-	disabled: _('disabled'),
+	disabled: _('disabled', 'fm160 keepalive state'),
 	dead:    _('died unexpectedly')
 };
 
@@ -80,7 +80,7 @@ function kaRows(ka) {
 	if (ka.last_targets)
 		lastTxt = '%s (%s)'.format(lastTxt, ka.last_targets);
 	return [
-		row(_('Keepalive'), ka.enable ? stateTxt : _('disabled')),
+		row(_('Keepalive'), ka.enable ? stateTxt : _('disabled', 'fm160 keepalive state')),
 		row(_('Last check'), lastTxt),
 		row(_('Failed rounds'),
 			_('%d consecutive / %d in 24 h / %d total').format(
@@ -192,7 +192,7 @@ return view.extend({
 					row(_('Registered'), reg ? _('yes') : _('no')),
 					row(_('Link'), linkUp ?
 						_('up on %s').format(d.link.ifname) :
-						_('down')),
+						_('down', 'fm160 link state')),
 					row(_('IPv4 address'), (d.link && d.link.v4) || _('none')),
 					row(_('IPv6 address'), (d.link && d.link.v6) || _('none')),
 					row(_('Traffic'), d.link ?
