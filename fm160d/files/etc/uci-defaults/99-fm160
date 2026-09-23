@@ -60,6 +60,14 @@ fi
 # event would leave the LAN without global IPv6 until the link bounced.
 [ -x /etc/init.d/fm160-prefix ] && /etc/init.d/fm160-prefix enable
 
+# QMAP/MBIM boot autodial ships in the fibocom-dial package as the
+# fm160-dial init script; ECM autodials inside fm160d and does not need it.
+# Enabled for the same reason as the prefix service: the point of
+# dial_autostart is that the link survives a reboot.  The script itself
+# re-checks dial_autostart/dial_mode, so enabling it is harmless when the
+# install dials ECM or leaves autostart off.
+[ -x /etc/init.d/fm160-dial ] && /etc/init.d/fm160-dial enable
+
 # ModemManager opens every ttyUSB it finds and will interleave with our
 # transactions, so fm160d wants to be the single owner of the AT port.
 #
