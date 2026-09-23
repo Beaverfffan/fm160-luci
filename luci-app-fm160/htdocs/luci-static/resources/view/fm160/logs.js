@@ -106,7 +106,7 @@ return view.extend({
 		var entries = Array.isArray(res) ? res : (res && res.entries) ? res.entries : [];
 
 		this.statusline.textContent = res && res.error ?
-			_('Could not read the log: ') + res.error :
+			_('Could not read the log:') + ' ' + res.error :
 			(entries.length + ' ' + _('entries'));
 
 		this.tbody.innerHTML = '';

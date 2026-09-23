@@ -895,13 +895,14 @@ def main():
     # that has to be told, and they are set from the real extraction, not by
     # splitting the old number.
     JS_SOURCES = [
-        ('fm160/api.js',          53),
+        ('fm160/api.js',          68),
         ('view/fm160/cells.js',   73),
         ('view/fm160/debug.js',   21),
-        ('view/fm160/dial.js',    54),
+        ('view/fm160/dial.js',    70),
         ('view/fm160/gnss.js',   101),
-        ('view/fm160/overview.js', 54),
-        ('view/fm160/signal.js',  15),
+        ('view/fm160/logs.js',    15),
+        ('view/fm160/overview.js', 72),
+        ('view/fm160/signal.js',  21),
         ('view/fm160/sms.js',     97),
         ('view/fm160/usb.js',     57),
     ]
