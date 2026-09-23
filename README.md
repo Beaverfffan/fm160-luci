@@ -32,6 +32,10 @@ M2 之后的功能仍按约定「先出代码」，依赖设备实际能力处�
 `.ipk` 真机 `opkg install` 通过。同时把「QMI 偶发超时」定性为**请求级偶发失败**并量化
 （开机 0–200 s ≈ 1.8%，稳态 <0.17%）。与 M2 的关系见上方「两条拨号路径」。
 
+> **2026-09-23 已移除**：9/22 晚在 89614 新固件 + qmi_wwan_f 上复测，uqmi 数据面
+> 从未打通（拿到地址但 RX=0，随后 QMI 服务崩溃不可恢复）。目录已从本仓与
+> openwrt-fm160 删除；厂商栈 fibocom-dial 已声明 `CONFLICTS:=uqmi modemmanager`。
+
 ---
 
 ## 目录结构
@@ -63,11 +67,6 @@ fm160-luci/
 │   ├── htdocs/luci-static/resources/view/fm160/{overview,signal,cells,dial,gnss,sms,debug}.js
 │   ├── po/zh_Hans/fm160.po     简体中文（140 条，编译成 fm160.zh-cn.lmo）
 │   └── root/usr/share/{luci/menu.d,rpcd/acl.d}/luci-app-fm160.json
-├── fm160-qmi/          拨号层（可选）：全开源 QMI 拨号器，只用 uqmi + netifd，零厂商二进制
-│   ├── etc/{config,init.d}/fm160-qmi        uci 配置 + procd 服务（自愈重拨）
-│   ├── usr/sbin/fm160-qmi{, -at}            拨号器本体 + 零依赖 AT 助手
-│   ├── tools/{140-build-ipk,141-verify-ipk}.py   纯 Python 打包 / 校验 .ipk
-│   └── README.md        实测结论：5G SA 验收、QMI「偶发超时」的真机理、已知边界
 ├── tools/              门禁（每个都能单独跑；`sh tools/check.sh` 是总入口）
 │   ├── check.sh            总编排；STRICT=1 时 SKIP 记为失败（CI 用这个）
 │   ├── cccheck/            真 libubox/libubus 头文件下的编译 + 符号表 + OBJS/版本一致性 + CRLF
@@ -80,16 +79,13 @@ fm160-luci/
 └── notes/              工作日志与长期索引（引用约定见 notes/README.md）
 ```
 
-### 两条拨号路径（共用 `/dev/cdc-wdm0`，别同时开）
+### 拨号路径（2026-09-23 起唯一）
 
-| | `fm160d` 的拨号（M2） | `fm160-qmi/` |
-|---|---|---|
-| 形态 | 项目内 C 状态机（`dialer.c` / `net.c`），配 LuCI 页面 | 独立 POSIX sh 脚本，直接调 `uqmi` |
-| 依赖 | 本项目自己的 proto 与脚本 | 只要 `uqmi` + `netifd`，**零厂商二进制** |
-| 定位 | 设备上的常驻实现 | **已真机验证的参考实现**：5G SA 验收、QMI 偶发失败的量化、已知边界都写在那里 |
-
-`/dev/cdc-wdm0` 是**单 reader** 设备：`uqmi` / `qmicli` / `quectel-CM` / `fm160-qmi`
-互相之间必须独占，**不要两个一起跑**。
+`fm160-qmi/`（开源 uqmi 旁路）已于 2026-09-23 移除：9/22 晚在 89614 固件上复测，
+数据面从未打通（拿到地址但 RX=0）。厂商栈 `fibocom-dial`（openwrt-fm160 仓）声明
+`CONFLICTS:=uqmi modemmanager`——`/dev/cdc-wdm0` 是**单 reader** 设备，
+`uqmi` / `qmicli` / `quectel-CM` / ModemManager 互相之间必须独占，
+**不要和 fibocom-dial 同时装**。
 
 ## 分层
 

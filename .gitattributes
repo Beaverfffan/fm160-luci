@@ -1,5 +1,3 @@
 # 脚本必须保持 LF，部署目标为 OpenWrt (musl busybox)
 *.sh text eol=lf
 /usr/sbin/* text eol=lf
-fm160-qmi/etc/init.d/fm160-qmi text eol=lf
-fm160-qmi/usr/sbin/fm160-qmi text eol=lf
