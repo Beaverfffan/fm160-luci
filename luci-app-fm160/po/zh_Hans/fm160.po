@@ -65,6 +65,14 @@ msgstr ""
 #: view/fm160/gnss.js
 
 #: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
 msgid "\"In view\" is what the module itself reports, and \"parsed\" is how many of those satellites were actually present in the NMEA. They are shown side by side on purpose: if they differ, the answer was truncated, and that is a transport problem rather than a sky problem."
 msgstr "「可见」是模组自己报告的，而「已解析」是这些卫星里真正出现在 NMEA 中的数量。两者并排显示是有意为之：如果不一致，说明应答被截断了，那是传输问题而不是天空的问题。"
 
@@ -278,6 +286,10 @@ msgstr "辅助 GPS"
 msgid "At least one of IPv4 / IPv6 must be enabled."
 msgstr "IPv4 / IPv6 至少启用一项。"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "Auto-capturing every 30 s while this page is open…"
+msgstr "本页打开期间每 30 秒自动抓取…"
+
 #: view/fm160/logs.js
 msgid "Autoscroll"
 msgstr "自动滚动"
@@ -324,7 +336,7 @@ msgstr "锁频段"
 msgid "Band locking, cell locking and carrier aggregation live on the"
 msgstr "锁频段、锁小区与载波聚合在"
 
-#: view/fm160/overview.js
+#: view/fm160/cells.js view/fm160/overview.js
 msgid "Bandwidth"
 msgstr "带宽"
 
@@ -376,6 +388,10 @@ msgstr "锁小区已关闭。"
 #: view/fm160/cells.js
 msgid "Cell lock state has not been read yet."
 msgstr "锁小区状态尚未读取。"
+
+#: view/fm160/cells.js
+msgid "Cell scan (live AT)"
+msgstr "小区扫描（实时 AT）"
 
 #: menu.d
 msgid "Cells and Locking"
@@ -587,6 +603,10 @@ msgstr "下载为文件"
 msgid "EARFCN"
 msgstr "EARFCN"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "EARFCN / NRARFN"
+msgstr "EARFCN / NRARFN"
+
 #: view/fm160/dial.js
 msgid "ECM (native)"
 msgstr "ECM（原生）"
@@ -791,6 +811,10 @@ msgstr "最近的 +CMS ERROR"
 msgid "Last NMEA block"
 msgstr "最近的 NMEA 块"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "Last capture:"
+msgstr "最近抓取："
+
 #: view/fm160/dial.js
 msgid "Last check"
 msgstr "最近检查"
@@ -826,6 +850,10 @@ msgstr "链路"
 #: view/fm160/signal.js
 msgid "Link adaptation (AT+GTCELLINFO)"
 msgstr "链路自适应（AT+GTCELLINFO）"
+
+#: view/fm160/signal.js
+msgid "Live AT+GTCCINFO? neighbour list and AT+GTCAINFO? carrier aggregation, captured automatically; press the button for an immediate pass."
+msgstr "实时下发 AT+GTCCINFO?（邻区列表）与 AT+GTCAINFO?（载波聚合），自动抓取；按按钮立即抓取一轮。"
 
 #: view/fm160/logs.js
 msgid "Loading…"
@@ -988,6 +1016,10 @@ msgstr "邻区"
 msgid "Neighbour cells"
 msgstr "邻区"
 
+#: view/fm160/signal.js
+msgid "Neighbour cells (live AT)"
+msgstr "邻区（实时 AT）"
+
 #: view/fm160/overview.js
 msgid "Network"
 msgstr "网络"
@@ -1020,9 +1052,17 @@ msgstr "还没有测到带频率的小区。只有信号页打开时才会轮询
 msgid "No constellation has been heard from yet."
 msgstr "还没有收到任何星座。"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "No neighbour cells reported this capture."
+msgstr "本次抓取未上报邻区。"
+
 #: view/fm160/usb.js
 msgid "No profile may be chosen right now."
 msgstr "当前没有可选的配置。"
+
+#: view/fm160/cells.js
+msgid "No scan result yet."
+msgstr "No scan result yet."
 
 #: view/fm160/usb.js
 msgid "Not offered"
@@ -1078,7 +1118,11 @@ msgstr "运营商（AT+COPS）"
 msgid "PCC band"
 msgstr "PCC 频段"
 
-#: view/fm160/overview.js
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "PCC:"
+msgstr "PCC："
+
+#: view/fm160/cells.js view/fm160/overview.js view/fm160/signal.js
 msgid "PCI"
 msgstr "PCI"
 
@@ -1174,11 +1218,11 @@ msgstr "RAT"
 msgid "RAT preference: %s (fallback %s, then %s)"
 msgstr "RAT 偏好：%s（回退 %s，再 %s）"
 
-#: view/fm160/overview.js
+#: view/fm160/cells.js view/fm160/overview.js view/fm160/signal.js
 msgid "RSRP"
 msgstr "RSRP"
 
-#: view/fm160/overview.js
+#: view/fm160/cells.js view/fm160/overview.js view/fm160/signal.js
 msgid "RSRQ"
 msgstr "RSRQ"
 
@@ -1310,6 +1354,10 @@ msgstr "恢复管理"
 msgid "Rollback point"
 msgstr "回滚点"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "SCC"
+msgstr "SCC"
+
 #: view/fm160/overview.js
 msgid "SIM status"
 msgstr "SIM 状态"
@@ -1382,6 +1430,10 @@ msgstr "保存设置"
 msgid "Saving does not dial — press Connect. Changing the mode may restart the USB profile (30-90 s)."
 msgstr "保存不会拨号——请按连接。切换模式可能重启 USB 配置（30-90 秒）。"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "Search cells now"
+msgstr "立即搜索小区"
+
 #: view/fm160/sms.js
 msgid "Segments in it"
 msgstr "其中分段数"
@@ -1405,6 +1457,10 @@ msgstr "发送失败"
 #: view/fm160/sms.js
 msgid "Send this message?"
 msgstr "发送这条消息？"
+
+#: view/fm160/cells.js
+msgid "Sends AT+GTCCINFO? (serving cell and up to ten LTE / NR neighbours) and AT+GTCAINFO? (carrier aggregation) live, instead of relying on the daemon snapshot. AT+GTCELLSCAN is not used: on this firmware it blocks the AT channel for ~50 s and returns nothing."
+msgstr "实时下发 AT+GTCCINFO?（服务小区及最多十个 LTE / NR 邻区）与 AT+GTCAINFO?（载波聚合），不依赖守护进程快照。不使用 AT+GTCELLSCAN：该固件上它会阻塞 AT 通道约 50 秒且无任何返回。"
 
 #: view/fm160/sms.js
 msgid "Sends accepted"
@@ -1913,6 +1969,10 @@ msgstr "锁小区清除"
 msgid "cell lock set"
 msgstr "锁小区设置"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "cell scan"
+msgstr "小区搜索"
+
 #: view/fm160/signal.js
 msgid "cells and locking"
 msgstr "小区与锁定"
@@ -1932,6 +1992,14 @@ msgstr "已由回读确认。"
 #: fm160/api.js fm160d/net.c
 msgid "connected"
 msgstr "已连接"
+
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "dB (raw)"
+msgstr "dB（原始值）"
+
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "dBm (raw)"
+msgstr "dBm（原始值）"
 
 #: view/fm160/dial.js
 msgid "died unexpectedly"
@@ -2059,6 +2127,10 @@ msgstr "最近"
 msgid "in view, no fix yet"
 msgstr "可见但尚未定位"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "initiated"
+msgstr "initiated"
+
 #: view/fm160/usb.js
 msgid "interface exists so that netifd can own the address side of it. QMI and MBIM profiles are dialled by the kernel (uqmi / umbim) instead."
 msgstr "接口供 netifd 接管它的地址部分。QMI 与 MBIM 配置则改由内核（uqmi / umbim）拨号。"
@@ -2087,6 +2159,14 @@ msgstr "暂停管理"
 msgid "management resume"
 msgstr "恢复管理"
 
+#: view/fm160/cells.js
+msgid "manual trigger from the cells page"
+msgstr "小区页手动触发"
+
+#: view/fm160/signal.js
+msgid "manual trigger from the signal page"
+msgstr "信号页手动触发"
+
 #: view/fm160/dial.js
 msgid "mbimcli over cdc_mbim. Best measured single-flow speed (15-20 MB/s on this module)."
 msgstr "mbimcli 跑在 cdc_mbim 上。实测单流速度最佳（此模组 15-20 MB/s）。"
@@ -2095,9 +2175,17 @@ msgstr "mbimcli 跑在 cdc_mbim 上。实测单流速度最佳（此模组 15-20
 msgid "more than the 4 segments this daemon will send; the message will be refused"
 msgstr "超过本守护进程会发送的 4 段上限；该消息将被拒绝"
 
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "neighbour cells"
+msgstr "个邻区"
+
 #: view/fm160/dial.js view/fm160/gnss.js view/fm160/sms.js
 msgid "no"
 msgstr "否"
+
+#: view/fm160/cells.js view/fm160/signal.js
+msgid "no carrier aggregation"
+msgstr "无载波聚合"
 
 #: fm160/api.js
 msgid "no fix"
@@ -2205,6 +2293,10 @@ msgstr "静默窗"
 msgctxt "fm160 raw marker"
 msgid "raw"
 msgstr "原始值"
+
+#: view/fm160/cells.js
+msgid "raw bw code"
+msgstr "原始带宽码"
 
 #: view/fm160/cells.js
 msgid "raw token"

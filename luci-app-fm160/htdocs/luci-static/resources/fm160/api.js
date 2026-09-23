@@ -1459,6 +1459,40 @@ function parseCellinfo(text) {
 	return out;
 }
 
+/* +GTCCINFO? neighbour lines (AT manual §5.15):
+ * LTE: 2,rat,mcc,mnc,tac,cellid,earfcn(hex),pci(hex),bw,rxlev,rsrp,rsrq
+ * earfcn/pci/tac/cellid are HEX, like the service cell.  rsrp/rsrq arrive
+ * as positive raw codes (the serving cell's 68/28 correspond to the
+ * fm160d snapshot's ~-70 dBm / -5.5 dB), so they are displayed negated,
+ * flagged as raw module units - precision the daemon does not have for
+ * neighbours is not invented here. */
+function parseCcinfoNeighbors(text) {
+	var out = [];
+	var lines = String(text || '').split(/\r?\n/);
+
+	for (var i = 0; i < lines.length; i++) {
+		var f = lines[i].split(',');
+		if (f.length < 12 || f[0] !== '2')
+			continue;
+		var rat = parseInt(f[1], 10);
+		var rsrp = parseInt(f[10], 10);
+		var rsrq = parseInt(f[11], 10);
+
+		out.push({
+			rat:     rat,
+			nr:      rat >= 5,
+			mcc:     f[2], mnc: f[3],
+			arfcn:   parseInt(f[6], 16) || 0,
+			pci:     parseInt(f[7], 16) || 0,
+			bwCode:  f[8] ? parseInt(f[8], 10) : null,
+			rxlev:   parseInt(f[9], 10),
+			rsrpRaw: isNaN(rsrp) ? null : -rsrp,
+			rsrqRaw: isNaN(rsrq) ? null : -rsrq
+		});
+	}
+	return out;
+}
+
 /* +GTSTATIS? -> rx_rate,tx_rate,rx_bytes,tx_bytes (bytes/s, bytes) */
 function parseStatis(text) {
 	var m = /\+GTSTATIS:\s*(\d+),(\d+),(\d+),(\d+)/.exec(text || '');
@@ -1814,10 +1848,37 @@ return baseclass.extend({
 		});
 	},
 
+	/* Live cell scan (AT manual §5.15/5.17).  AT+GTCELLSCAN (§5.19) was
+	 * rejected: on this firmware (89614.1000.00.04.01.23, GTACT=2) it
+	 * blocks the AT channel for ~50 s and never emits a single
+	 * +GTCELLSCAN line, so the neighbour cells come from +GTCCINFO?
+	 * (serving + up to ten LTE/NR neighbours, instant) and carrier
+	 * aggregation from +GTCAINFO?.  Auto-captured on a 30 s poll while
+	 * a page is open; a manual press of the search button calls the
+	 * same function. */
+	cellscan: function() {
+		function at(cmd) {
+			return callAt({ cmd: cmd, timeout: 15000 }).then(function(r) {
+				return (r && r.response) || '';
+			}).catch(function() { return ''; });
+		}
+		return at('AT+GTCCINFO?').then(function(cc) {
+			return at('AT+GTCAINFO?').then(function(ca) {
+				return {
+					ccinfo:    parseCcinfo(cc),
+					neighbors: parseCcinfoNeighbors(cc),
+					cainfo:    parseCainfo(ca),
+					at:        { cc: cc, ca: ca }
+				};
+			});
+		});
+	},
+
 	caBandName: caBandName,
 	copsActName: copsActName,
 	parseCcinfo: parseCcinfo,
 	parseCainfo: parseCainfo,
+	parseCcinfoNeighbors: parseCcinfoNeighbors,
 	parseCellinfo: parseCellinfo,
 	parseStatis: parseStatis,
 	parseCops: parseCops,

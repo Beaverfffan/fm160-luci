@@ -53,8 +53,13 @@ return view.extend({
 		this.banner = E('div', {});
 		this.metrics = E('div', {});
 		this.tables = E('div', {});
-		this.container = E('div', {}, [ this.banner, this.metrics, this.tables ]);
+		this.scanBox = E('div', {});
+		this.container = E('div', {}, [ this.banner, this.metrics, this.tables, this.scanBox ]);
+		this.scanData = null;
+		this.scanStamp = null;
+		this.scanBusy = false;
 		this.paint(state);
+		this.paintScan();
 
 		poll.add(function() {
 			if (!document.body.contains(self.container)) {
@@ -80,7 +85,97 @@ return view.extend({
 			});
 		}, 2);
 
+		/* Neighbour cell scan shares the 30 s cadence: one cellscan per
+		 * radio round, not one per 2 s metrics round. */
+		poll.add(function() {
+			if (!document.body.contains(self.container)) {
+				poll.stop();
+				return Promise.resolve();
+			}
+			return self.scan();
+		}, 30);
+
 		return this.container;
+	},
+
+	scan: function() {
+		var self = this;
+
+		if (self.scanBusy)
+			return Promise.resolve();
+		self.scanBusy = true;
+
+		return api.cellscan().then(function(res) {
+			self.scanData = res;
+			self.scanStamp = new Date();
+			self.paintScan();
+		}).catch(function() {
+		}).then(function() {
+			self.scanBusy = false;
+		});
+	},
+
+	paintScan: function() {
+		var self = this;
+
+		this.scanBox.innerHTML = '';
+
+		var status = this.scanStamp
+			? (_('Last capture:') + ' ' + this.scanStamp.toLocaleString() + ' — ' +
+			   (this.scanData ? this.scanData.neighbors.length + ' ' + _('neighbour cells') : '-'))
+			: _('Auto-capturing every 30 s while this page is open…');
+
+		var box = E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, _('Neighbour cells (live AT)')),
+			E('p', { 'class': 'hint' },
+			  _('Live AT+GTCCINFO? neighbour list and AT+GTCAINFO? carrier aggregation, captured automatically; press the button for an immediate pass.')),
+			E('div', {}, [
+				E('button', {
+					'class': 'btn cbi-button-action',
+					'click': ui.createHandlerFn(this, function() {
+						api.opLog(_('cell scan'), _('manual trigger from the signal page'), _('initiated'));
+						return this.scan();
+					})
+				}, _('Search cells now')),
+				' ',
+				E('span', { 'class': 'hint' }, status)
+			])
+		]);
+
+		if (this.scanData && this.scanData.neighbors.length) {
+			box.appendChild(E('table', { 'class': 'table' }, [
+				E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th' }, _('RAT')),
+					E('th', { 'class': 'th' }, _('EARFCN / NRARFN')),
+					E('th', { 'class': 'th' }, _('PCI')),
+					E('th', { 'class': 'th' }, _('RSRP')),
+					E('th', { 'class': 'th' }, _('RSRQ'))
+				])
+			].concat(this.scanData.neighbors.map(function(n) {
+				return E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, n.nr ? 'NR' : 'LTE'),
+					E('td', { 'class': 'td' }, String(n.arfcn)),
+					E('td', { 'class': 'td' }, String(n.pci)),
+					E('td', { 'class': 'td' }, n.rsrpRaw !== null ? (n.rsrpRaw + ' ' + _('dBm (raw)')) : '-'),
+					E('td', { 'class': 'td' }, n.rsrqRaw !== null ? (n.rsrqRaw + ' ' + _('dB (raw)')) : '-')
+				]);
+			}))));
+		} else if (this.scanData) {
+			box.appendChild(E('p', { 'class': 'hint' },
+				_('No neighbour cells reported this capture.')));
+		}
+
+		if (this.scanData && this.scanData.cainfo && this.scanData.cainfo.pcc) {
+			var pcc = this.scanData.cainfo.pcc;
+			box.appendChild(E('p', { 'class': 'hint' }, [
+				_('PCC:'), ' ', pcc.band, ' / ' + (pcc.bw || '-') + ' MHz / PCI ' + pcc.pci,
+				this.scanData.cainfo.scc.length
+					? ' / ' + this.scanData.cainfo.scc.length + ' ' + _('SCC')
+					: ' / ' + _('no carrier aggregation')
+			]));
+		}
+
+		this.scanBox.appendChild(box);
 	},
 
 	paint: function(state) {

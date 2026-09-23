@@ -103,6 +103,9 @@ return view.extend({
 		var self = this;
 
 		this.container = E('div', {});
+		this.scanData = null;
+		this.scanStamp = null;
+		this.scanBusy = false;
 		this.paint(state);
 
 		/* Cell data (neighbour list) is only polled while a page that needs it
@@ -118,7 +121,36 @@ return view.extend({
 			});
 		}, 2);
 
+		/* Live AT scan: serving cell + neighbours + CA, every 30 s while
+		 * this page is open.  The manual button calls the same capture. */
+		poll.add(function() {
+			if (!document.body.contains(self.container)) {
+				poll.stop();
+				return Promise.resolve();
+			}
+			return self.scan();
+		}, 30);
+
 		return this.container;
+	},
+
+	scan: function() {
+		var self = this;
+
+		if (self.scanBusy)
+			return Promise.resolve();
+		self.scanBusy = true;
+
+		return api.cellscan().then(function(res) {
+			self.scanData = res;
+			self.scanStamp = new Date();
+			self.paintScan();
+		}).catch(function() {
+			/* a failed scan keeps the previous table; the stamp line says
+			 * nothing new arrived, which is the honest state */
+		}).then(function() {
+			self.scanBusy = false;
+		});
 	},
 
 	paint: function(state) {
@@ -126,11 +158,93 @@ return view.extend({
 		this.container.innerHTML = '';
 
 		this.container.appendChild(this.renderBanner(state));
+		this.container.appendChild(this.renderScan());
 		this.container.appendChild(this.renderBands(state));
 		this.container.appendChild(this.renderBandLock(state));
 		this.container.appendChild(this.renderLockTargets(state));
 		this.container.appendChild(this.renderCellLock(state));
 		this.container.appendChild(this.renderCa(state));
+	},
+
+	/* --- live cell scan (manual + auto) ------------------------------ */
+
+	renderScan: function() {
+		var self = this;
+
+		this.scanStatus = E('p', { 'class': 'hint' },
+			_('Auto-capturing every 30 s while this page is open…'));
+		this.scanBody = E('div', {});
+
+		this.scanBtn = E('button', {
+			'class': 'btn cbi-button-action',
+			'click': ui.createHandlerFn(this, function() {
+				api.opLog(_('cell scan'), _('manual trigger from the cells page'), _('initiated'));
+				return this.scan();
+			})
+		}, _('Search cells now'));
+
+		return E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, _('Cell scan (live AT)')),
+			E('p', { 'class': 'hint' },
+			  _('Sends AT+GTCCINFO? (serving cell and up to ten LTE / NR neighbours) and AT+GTCAINFO? (carrier aggregation) live, instead of relying on the daemon snapshot. AT+GTCELLSCAN is not used: on this firmware it blocks the AT channel for ~50 s and returns nothing.')),
+			E('div', {}, [ this.scanBtn, ' ', this.scanStatus ]),
+			this.scanBody
+		]);
+	},
+
+	paintScan: function() {
+		var d = this.scanData;
+
+		if (!d) {
+			this.scanStatus.textContent = _('No scan result yet.');
+			return;
+		}
+
+		this.scanStatus.textContent = _('Last capture:') + ' ' +
+			this.scanStamp.toLocaleString() + ' — ' +
+			(d.neighbors.length + ' ' + _('neighbour cells'));
+
+		this.scanBody.innerHTML = '';
+
+		if (d.neighbors.length) {
+			var rows = d.neighbors.map(function(n) {
+				return E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, n.nr ? 'NR' : 'LTE'),
+					E('td', { 'class': 'td' }, String(n.arfcn)),
+					E('td', { 'class': 'td' }, String(n.pci)),
+					E('td', { 'class': 'td' }, n.bwCode ? (n.bwCode + ' ' + _('raw bw code')) : '-'),
+					E('td', { 'class': 'td' }, n.rsrpRaw !== null ? (n.rsrpRaw + ' ' + _('dBm (raw)')) : '-'),
+					E('td', { 'class': 'td' }, n.rsrqRaw !== null ? (n.rsrqRaw + ' ' + _('dB (raw)')) : '-')
+				]);
+			});
+
+			this.scanBody.appendChild(E('table', { 'class': 'table' }, [
+				E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th' }, _('RAT')),
+					E('th', { 'class': 'th' }, _('EARFCN / NRARFN')),
+					E('th', { 'class': 'th' }, _('PCI')),
+					E('th', { 'class': 'th' }, _('Bandwidth')),
+					E('th', { 'class': 'th' }, _('RSRP')),
+					E('th', { 'class': 'th' }, _('RSRQ'))
+				]),
+				rows
+			]));
+		} else {
+			this.scanBody.appendChild(E('p', { 'class': 'hint' },
+				_('No neighbour cells reported this capture.')));
+		}
+
+		if (d.cainfo && d.cainfo.pcc) {
+			var ca = [ E('p', { 'class': 'hint' }, [
+				_('PCC:'), ' ', d.cainfo.pcc.band,
+				' / ' + (d.cainfo.pcc.bw || '-') + ' MHz',
+				' / PCI ' + d.cainfo.pcc.pci,
+				d.cainfo.scc.length
+					? ' / ' + d.cainfo.scc.length + ' ' + _('SCC')
+					: ' / ' + _('no carrier aggregation')
+			]) ];
+			this.scanBody.appendChild(E('div', {}, ca));
+		}
 	},
 
 	/* --- banner ----------------------------------------------------- */
