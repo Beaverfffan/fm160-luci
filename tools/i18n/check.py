@@ -901,6 +901,7 @@ def main():
         ('view/fm160/dial.js',    70),
         ('view/fm160/gnss.js',   101),
         ('view/fm160/logs.js',    15),
+        ('view/fm160/mwan.js',    44),
         ('view/fm160/overview.js', 72),
         ('view/fm160/signal.js',  21),
         ('view/fm160/sms.js',     97),

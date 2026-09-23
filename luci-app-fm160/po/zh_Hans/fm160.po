@@ -75,6 +75,8 @@ msgstr ""
 #: view/fm160/gnss.js
 
 #: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
 msgid "\"In view\" is what the module itself reports, and \"parsed\" is how many of those satellites were actually present in the NMEA. They are shown side by side on purpose: if they differ, the answer was truncated, and that is a transport problem rather than a sky problem."
 msgstr "「可见」是模组自己报告的，而「已解析」是这些卫星里真正出现在 NMEA 中的数量。两者并排显示是有意为之：如果不一致，说明应答被截断了，那是传输问题而不是天空的问题。"
 
@@ -255,6 +257,10 @@ msgstr "最后一次空应答的年龄"
 msgid "Age of this reading"
 msgstr "本次读数的年龄"
 
+#: view/fm160/mwan.js
+msgid "All fm160-managed mwan3 interface and member sections are deleted and removed from every policy. Sections you wrote yourself are not touched. The interfaces themselves keep working - only the mwan3 side is unwound."
+msgstr "所有 fm160 托管的 mwan3 interface/member 配置段会被删除并从所有策略移除。你自己写的配置段不受影响。接口本身继续工作——只是撤掉 mwan3 侧。"
+
 #: view/fm160/sms.js
 msgid "Already held when seen again"
 msgstr "再次见到时已存在"
@@ -291,6 +297,10 @@ msgstr "IPv4 / IPv6 至少启用一项。"
 #: view/fm160/cells.js view/fm160/signal.js
 msgid "Auto-capturing every 30 s while this page is open…"
 msgstr "本页打开期间每 30 秒自动抓取…"
+
+#: view/fm160/mwan.js
+msgid "Auto-register into mwan3"
+msgstr "自动注册到 mwan3"
 
 #: view/fm160/logs.js
 msgid "Autoscroll"
@@ -362,7 +372,7 @@ msgstr "CQI %d，%s，DL MCS %d / UL MCS %d"
 msgid "CQI / RANK / MCS"
 msgstr "CQI / RANK / MCS"
 
-#: view/fm160/cells.js view/fm160/gnss.js view/fm160/overview.js view/fm160/sms.js view/fm160/usb.js
+#: view/fm160/cells.js view/fm160/gnss.js view/fm160/mwan.js view/fm160/overview.js view/fm160/sms.js view/fm160/usb.js
 msgid "Cancel"
 msgstr "取消"
 
@@ -407,6 +417,10 @@ msgstr "可锁定的小区"
 msgid "Change to"
 msgstr "切换到"
 
+#: view/fm160/mwan.js
+msgid "Check interval (s)"
+msgstr "检测间隔（秒）"
+
 #: view/fm160/dial.js
 msgid "Check interval (seconds)"
 msgstr "检查间隔（秒）"
@@ -414,6 +428,10 @@ msgstr "检查间隔（秒）"
 #: view/fm160/dial.js
 msgid "Check interval must be 10-600 seconds."
 msgstr "检查间隔必须在 10-600 秒之间。"
+
+#: view/fm160/mwan.js
+msgid "Class"
+msgstr "类别"
 
 #: view/fm160/logs.js
 msgid "Clear log"
@@ -551,6 +569,10 @@ msgstr "删除这条消息？"
 msgid "Detail"
 msgstr "详情"
 
+#: view/fm160/mwan.js
+msgid "Device"
+msgstr "设备"
+
 #: view/fm160/debug.js view/fm160/gnss.js view/fm160/sms.js
 msgctxt "fm160 diagnostics heading"
 msgid "Diagnostics"
@@ -591,6 +613,10 @@ msgstr "关闭锁小区？"
 #: view/fm160/dial.js
 msgid "Disconnect"
 msgstr "断开连接"
+
+#: view/fm160/mwan.js
+msgid "Discovered interfaces"
+msgstr "已发现的接口"
 
 #: view/fm160/overview.js
 msgctxt "fm160 traffic direction"
@@ -660,6 +686,14 @@ msgstr "FM160"
 #: view/fm160/dial.js
 msgid "Failed rounds"
 msgstr "失败轮次"
+
+#: view/fm160/mwan.js
+msgid "Failure check interval (s)"
+msgstr "故障检测间隔（秒）"
+
+#: view/fm160/mwan.js
+msgid "Family"
+msgstr "协议族"
 
 #: view/fm160/debug.js
 msgid "Fetch and show"
@@ -769,7 +803,7 @@ msgstr "参与定位"
 msgid "In view (reported)"
 msgstr "可见（模组报告）"
 
-#: view/fm160/overview.js
+#: view/fm160/mwan.js view/fm160/overview.js
 msgid "Interface"
 msgstr "接口"
 
@@ -853,9 +887,17 @@ msgstr "链路"
 msgid "Link adaptation (AT+GTCELLINFO)"
 msgstr "链路自适应（AT+GTCELLINFO）"
 
+#: view/fm160/mwan.js
+msgid "Live \"mwan3 interfaces\" output appears here after Sync now."
+msgstr "按「立即同步」后此处显示 mwan3 interfaces 实时输出。"
+
 #: view/fm160/signal.js
 msgid "Live AT+GTCCINFO? neighbour list and AT+GTCAINFO? carrier aggregation, captured automatically; press the button for an immediate pass."
 msgstr "实时下发 AT+GTCCINFO?（邻区列表）与 AT+GTCAINFO?（载波聚合），自动抓取；按按钮立即抓取一轮。"
+
+#: view/fm160/mwan.js
+msgid "Live state"
+msgstr "实时状态"
 
 #: view/fm160/logs.js
 msgid "Loading…"
@@ -897,6 +939,10 @@ msgstr "锁小区会把模组钉在一个小区上。它保存在模组里，且
 msgid "Longitude"
 msgstr "经度"
 
+#: view/fm160/mwan.js
+msgid "Lower metric wins failover; equal metrics balance by weight."
+msgstr "metric 越小优先级越高（故障切换）；metric 相同的接口按权重分享流量。"
+
 #: view/fm160/dial.js
 msgid "MBIM (standard)"
 msgstr "MBIM（标准）"
@@ -908,6 +954,14 @@ msgstr "MCS DL / UL"
 #: view/fm160/overview.js
 msgid "MIMO / modulation"
 msgstr "MIMO / 调制"
+
+#: menu.d
+msgid "MWAN3"
+msgstr "MWAN3 均衡"
+
+#: view/fm160/mwan.js
+msgid "MWAN3 integration"
+msgstr "MWAN3 integration"
 
 #: view/fm160/gnss.js
 msgid "Malformed"
@@ -957,6 +1011,16 @@ msgstr "模组上的消息"
 #: view/fm160/sms.js
 msgid "Messages the modem still holds will not come back on the next refresh, but a message kept only here is gone for good."
 msgstr "模组仍持有的消息不会在下次刷新时回来，而只保存在这里的消息则会永久消失。"
+
+#: view/fm160/mwan.js
+msgctxt "fm160 mwan3"
+msgid "Mobile priority (metric)"
+msgstr "移动优先级（metric）"
+
+#: view/fm160/mwan.js
+msgctxt "fm160 mwan3"
+msgid "Mobile weight"
+msgstr "移动权重"
 
 #: view/fm160/usb.js
 msgid "Mode"
@@ -1054,6 +1118,10 @@ msgstr "还没有测到带频率的小区。只有信号页打开时才会轮询
 msgid "No constellation has been heard from yet."
 msgstr "还没有收到任何星座。"
 
+#: view/fm160/mwan.js
+msgid "No fm160-managed mwan3 sections yet."
+msgstr "尚无 fm160 托管的 mwan3 配置段。"
+
 #: view/fm160/cells.js view/fm160/signal.js
 msgid "No neighbour cells reported this capture."
 msgstr "本次抓取未上报邻区。"
@@ -1078,6 +1146,10 @@ msgstr "不可选"
 msgctxt "fm160 usb notes heading"
 msgid "Notes"
 msgstr "说明"
+
+#: view/fm160/mwan.js
+msgid "Nothing discovered yet. Auto-registration is off, or no WAN-side interface exists."
+msgstr "尚无可发现接口。自动注册关闭，或不存在 WAN 侧接口。"
 
 #: view/fm160/sms.js
 msgid "Nothing is sent until you confirm."
@@ -1160,6 +1232,10 @@ msgstr "暂停 FM160 管理"
 msgid "Pause management"
 msgstr "暂停管理"
 
+#: view/fm160/mwan.js
+msgid "Ping count per round"
+msgstr "每轮 ping 次数"
+
 #: view/fm160/dial.js
 msgid "Ping target IPv4 (empty = module DNS)"
 msgstr "IPv4 探测目标（留空 = 模组 DNS）"
@@ -1167,6 +1243,10 @@ msgstr "IPv4 探测目标（留空 = 模组 DNS）"
 #: view/fm160/dial.js
 msgid "Ping target IPv6 (empty = module DNS)"
 msgstr "IPv6 探测目标（留空 = 模组 DNS）"
+
+#: view/fm160/mwan.js
+msgid "Ping timeout (s)"
+msgstr "ping 超时（秒）"
 
 #: view/fm160/overview.js
 msgid "Polling is tiered: registration every 5 s while a page is open, cells every 10 s, and byte counters are read from sysfs so they cost no AT commands at all."
@@ -1308,6 +1388,14 @@ msgstr "暂时拒绝：没有 AT 口，或者还没问过模组处在哪个配�
 msgid "Registered"
 msgstr "已注册"
 
+#: view/fm160/mwan.js
+msgid "Registered in mwan3: %s"
+msgstr "已注册进 mwan3：%s"
+
+#: view/fm160/mwan.js
+msgid "Registration removed."
+msgstr "注册已移除。"
+
 #: view/fm160/sms.js
 msgid "Reload list"
 msgstr "重新加载列表"
@@ -1319,6 +1407,14 @@ msgstr "连续 N 轮失败后重载模块"
 #: view/fm160/cells.js
 msgid "Remove band restriction"
 msgstr "解除频段限制"
+
+#: view/fm160/mwan.js
+msgid "Remove mwan3 registration?"
+msgstr "移除 mwan3 注册？"
+
+#: view/fm160/mwan.js
+msgid "Remove registration"
+msgstr "移除注册"
 
 #: view/fm160/cells.js
 msgid "Remove the band restriction?"
@@ -1359,6 +1455,14 @@ msgstr "恢复管理"
 #: view/fm160/usb.js
 msgid "Rollback point"
 msgstr "回滚点"
+
+#: view/fm160/mwan.js
+msgid "Rounds to declare down"
+msgstr "判为掉线的轮数"
+
+#: view/fm160/mwan.js
+msgid "Rounds to declare up"
+msgstr "判为恢复的轮数"
 
 #: view/fm160/cells.js view/fm160/signal.js
 msgid "SCC"
@@ -1428,9 +1532,21 @@ msgstr "可见卫星"
 msgid "Satellites used in fix"
 msgstr "参与定位的卫星"
 
+#: view/fm160/mwan.js
+msgid "Save and sync"
+msgstr "保存并同步"
+
+#: view/fm160/mwan.js
+msgid "Save failed"
+msgstr "保存失败"
+
 #: view/fm160/dial.js
 msgid "Save settings"
 msgstr "保存设置"
+
+#: view/fm160/mwan.js
+msgid "Saved and synced."
+msgstr "已保存并同步。"
 
 #: view/fm160/dial.js
 msgid "Saving does not dial — press Connect. Changing the mode may restart the USB profile (30-90 s)."
@@ -1573,6 +1689,18 @@ msgstr "正在切换 USB 配置…"
 msgid "Switching a profile restarts the module."
 msgstr "切换配置会重启模组。"
 
+#: view/fm160/mwan.js
+msgid "Sync failed"
+msgstr "同步失败"
+
+#: view/fm160/mwan.js
+msgid "Sync now"
+msgstr "立即同步"
+
+#: view/fm160/mwan.js
+msgid "Synced."
+msgstr "已同步。"
+
 #: view/fm160/overview.js
 msgid "TAC"
 msgstr "TAC"
@@ -1624,6 +1752,10 @@ msgstr "整个过程引擎持续运行，不涉及复位。"
 #: view/fm160/cells.js
 msgid "The following values will be written to the modem:"
 msgstr "以下值将写入模组："
+
+#: view/fm160/mwan.js
+msgid "The hotplug hook re-runs the registration on every interface up/down, so plugging or unplugging a cable is enough - no save needed."
+msgstr "hotplug 钩子会在每个接口 up/down 时重跑注册，插拔网线即可生效——无需保存。"
 
 #: view/fm160/gnss.js
 msgid "The last answer contained no NMEA sentence."
@@ -1737,9 +1869,17 @@ msgstr "接收机开启后需要一点时间；连续出现一两次这种情况
 msgid "The receiver stops, and at least one NMEA read will answer ERROR until it is switched on again."
 msgstr "接收机停止，并且在重新打开之前，至少会有一次 NMEA 读取回答 ERROR。"
 
+#: view/fm160/mwan.js
+msgid "The registration below is written to /etc/config/mwan3, but without the package installed it does nothing. Install it with"
+msgstr "以下注册会写入 /etc/config/mwan3，但没装该包不会生效。安装命令："
+
 #: view/fm160/gnss.js
 msgid "The setting is not stored by the module, so it will be off again after the next power cycle unless autostart is enabled."
 msgstr "模组不保存该设置，因此除非启用自动启动，下次断电重启后它会再次关闭。"
+
+#: view/fm160/mwan.js
+msgid "The status snapshot failed"
+msgstr "状态快照获取失败"
 
 #: view/fm160/usb.js
 msgid "The switch has been sent. The module is restarting; expect it to be gone for 30-90 s. This page will follow it."
@@ -1829,6 +1969,14 @@ msgstr "时间（按戳记）"
 msgid "To"
 msgstr "收件人"
 
+#: view/fm160/mwan.js
+msgid "Track targets IPv4 (space separated)"
+msgstr "IPv4 探测目标（空格分隔）"
+
+#: view/fm160/mwan.js
+msgid "Track targets IPv6 (space separated)"
+msgstr "IPv6 探测目标（空格分隔）"
+
 #: view/fm160/dial.js view/fm160/overview.js
 msgid "Traffic"
 msgstr "流量"
@@ -1893,6 +2041,20 @@ msgstr "参与定位"
 #: view/fm160/sms.js
 msgid "View"
 msgstr "查看"
+
+#: view/fm160/mwan.js
+msgctxt "fm160 mwan3"
+msgid "Wired priority (metric)"
+msgstr "有线优先级（metric）"
+
+#: view/fm160/mwan.js
+msgctxt "fm160 mwan3"
+msgid "Wired weight"
+msgstr "有线权重"
+
+#: view/fm160/mwan.js
+msgid "With the defaults above, wired eth is the preferred path and the FM160 link is the backup; while both are up, traffic is shared 3:1 (wired:mobile). Interfaces are discovered automatically - wired (device ethN) and the FM160 dial interface (whichever dial mode is active). Everything this feature writes into mwan3 is tagged and cleaned up when the interface disappears or auto-registration is turned off; your own mwan3 sections are never touched."
+msgstr "以上默认值下，有线 eth 是首选路径，FM160 链路是备份；两者都在线时按 3:1（有线:移动）分享流量。接口自动发现——有线（设备 ethN）与 FM160 拨号接口（当前激活的拨号模式）。本功能写入 mwan3 的内容全部带标记，接口消失或关闭自动注册时自动清理；你自己写的 mwan3 配置不会被触碰。"
 
 #: view/fm160/gnss.js
 msgid "Write"
@@ -2089,6 +2251,10 @@ msgstr "字段"
 msgid "fix acquired"
 msgstr "已定位"
 
+#: view/fm160/mwan.js
+msgid "fm160-mwan3-sync exited with"
+msgstr "fm160-mwan3-sync 退出码"
+
 #: view/fm160/usb.js
 msgid "fm160d"
 msgstr "fm160d"
@@ -2181,9 +2347,18 @@ msgstr "信号页手动触发"
 msgid "mbimcli over cdc_mbim. Best measured single-flow speed (15-20 MB/s on this module)."
 msgstr "mbimcli 跑在 cdc_mbim 上。实测单流速度最佳（此模组 15-20 MB/s）。"
 
+#: view/fm160/mwan.js
+msgctxt "fm160 mwan3 class"
+msgid "mobile"
+msgstr "移动"
+
 #: view/fm160/sms.js
 msgid "more than the 4 segments this daemon will send; the message will be refused"
 msgstr "超过本守护进程会发送的 4 段上限；该消息将被拒绝"
+
+#: view/fm160/mwan.js
+msgid "mwan3 is not installed."
+msgstr "mwan3 未安装。"
 
 #: view/fm160/cells.js view/fm160/signal.js
 msgid "neighbour cells"
@@ -2480,6 +2655,11 @@ msgstr "等待地址"
 #: fm160d/net.c
 msgid "waiting for registration"
 msgstr "等待注网"
+
+#: view/fm160/mwan.js
+msgctxt "fm160 mwan3 class"
+msgid "wired"
+msgstr "有线"
 
 #: view/fm160/gnss.js
 msgid "xtra"

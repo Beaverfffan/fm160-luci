@@ -57,6 +57,14 @@
 			"path": "fm160/gnss"
 		}
 	},
+	"admin/fm160/mwan3": {
+		"title": "MWAN3",
+		"order": 45,
+		"action": {
+			"type": "view",
+			"path": "fm160/mwan"
+		}
+	},
 	"admin/fm160/sms": {
 		"title": "SMS",
 		"order": 50,

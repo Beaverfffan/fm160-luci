@@ -80,6 +80,12 @@ define Package/luci-app-fm160/install
 	$(CP) ./root/* $(1)/
 	$(INSTALL_DIR) $(1)/www
 	$(CP) ./htdocs/* $(1)/www/
+	# $(CP) preserves checkout permissions, which git does not guarantee for
+	# the executable bits below - reinstall them explicitly so the scripts
+	# actually run on the device.
+	$(INSTALL_BIN) ./root/usr/sbin/fm160-mwan3-sync $(1)/usr/sbin/fm160-mwan3-sync
+	$(INSTALL_BIN) ./root/etc/hotplug.d/iface/32-fm160-mwan3 $(1)/etc/hotplug.d/iface/32-fm160-mwan3
+	$(INSTALL_BIN) ./root/etc/uci-defaults/99-fm160-mwan3 $(1)/etc/uci-defaults/99-fm160-mwan3
 endef
 
 $(eval $(call BuildPackage,luci-app-fm160))
