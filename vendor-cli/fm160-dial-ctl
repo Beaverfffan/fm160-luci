@@ -51,15 +51,20 @@ ifname_for() { [ "$1" = ecm ] && echo usb0 || echo wwan0; }
 usb_mode() { ubus call fm160 status 2>/dev/null | grep '"usb_mode"' | grep -o '[0-9]*'; }
 
 ensure_usb_mode() {
-	local want="$1" cur i
+	local want="$1" cur i dev
 	cur=$(usb_mode)
 	[ "$cur" = "$want" ] && return 0
 	log "usb mode $cur -> $want"
 	ubus call fm160 setusbmode "{\"mode\":$want}" >/dev/null 2>&1
+	# 各 profile 的可用性标志不同：ECM 起 usb0，QMAP/MBIM 起 cdc-wdm0
+	case "$want" in
+		33) dev=/sys/class/net/usb0 ;;
+		*)  dev=/dev/cdc-wdm0 ;;
+	esac
 	i=0
 	while [ $i -lt 45 ]; do
 		sleep 4; i=$((i+1))
-		[ -c /dev/cdc-wdm0 ] || continue
+		[ -e "$dev" ] || continue
 		cur=$(usb_mode)
 		[ "$cur" = "$want" ] && { sleep 4; return 0; }
 	done
@@ -68,33 +73,43 @@ ensure_usb_mode() {
 }
 
 # ── network interface visibility (LuCI 网络 → 接口) ────────────────────────
+# 三种模式各有独立 netifd 协议芯片（luci-proto-*-fm160 包提供，全部基于
+# 广和通 vendor CLI 而非原生 umbim/uqmi/dhcp）：
+#   ecm  -> proto ecm_fm160  (usb0)   qmap -> proto qmi_fm160  (wwan0)
+#   mbim -> proto mbim_fm160 (wwan0)
 netif_sync() {
-	local m="$1" ifname dev proto
-	ifname=$(ifname_for "$m")
-	if [ "$m" = ecm ]; then proto=dhcp; dev=usb0; else proto=none; dev=wwan0; fi
-	if ! uci -q get network.fm160 >/dev/null 2>&1; then
-		uci set network.fm160=interface
-	fi
-	uci set network.fm160.proto="$proto"
-	uci set network.fm160.device="$dev"
-	uci set network.fm160.metric='40'
-	uci commit network
-	/etc/init.d/network reload >/dev/null 2>&1
-}
-
-# ── v6-only completion (fibocom-dial quirk: no default route / no DNS) ─────
-v6_fix() {
-	[ "$(v6)" = 1 ] && [ "$(v4)" = 0 ] || return 0
-	local gw dns
-	sleep 8
-	gw=$(grep 'IPv6 Gateway' /var/log/vendor-qmap.log 2>/dev/null | tail -1 | awk '{print $NF}' | tr -d '\r')
-	[ -n "$gw" ] && ip -6 route replace default via "$gw" dev wwan0 2>/dev/null
-	dns=$(grep 'IPv6 DNS1' /var/log/vendor-qmap.log 2>/dev/null | tail -1 | cut -d"'" -f2 | tr -d '\r')
-	case "$dns" in
-		*:*)
-			grep -q "nameserver $dns" /etc/resolv.conf 2>/dev/null || \
-				echo "nameserver $dns" >> /etc/resolv.conf ;;
+	local m="$1" dev proto_ changed=0
+	case "$m" in
+		ecm)  proto_=ecm_fm160;  dev=usb0 ;;
+		qmap) proto_=qmi_fm160;  dev=wwan0 ;;
+		*)    proto_=mbim_fm160; dev=wwan0 ;;
 	esac
+	if ! uci -q get network.fm160 >/dev/null 2>&1; then
+		uci set network.fm160=interface; changed=1
+	fi
+	[ "$(uci -q get network.fm160.proto)" = "$proto_" ]  || { uci set network.fm160.proto="$proto_"; changed=1; }
+	[ "$(uci -q get network.fm160.device)" = "$dev" ]    || { uci set network.fm160.device="$dev"; changed=1; }
+	[ "$(uci -q get network.fm160.metric)" = "40" ]      || { uci set network.fm160.metric='40'; changed=1; }
+	uci commit network
+
+	# 自动挂防火墙：未挂任何 zone 时加入 wan 区。ECM v6 的 RA、三种模式
+	# 的 ND/NS 都依赖 fw4 放行（fw4 input 默认 drop，不在 zone 里的接口
+	# 连 RA 都收不进内核）
+	local z=0 zname znet inzone="" wanidx=""
+	while zname=$(uci -q get firewall.@zone[$z].name 2>/dev/null); do
+		znet=$(uci -q get firewall.@zone[$z].network 2>/dev/null)
+		echo " $znet " | grep -q ' fm160 ' && inzone=1
+		[ "$zname" = wan ] && wanidx=$z
+		z=$((z + 1))
+	done
+	if [ -z "$inzone" ] && [ -n "$wanidx" ]; then
+		uci add_list firewall.@zone[$wanidx].network=fm160
+		uci commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1
+	fi
+
+	# proto 变更必须让 netifd 重读配置；仅 ifup 不会重新解析 uci
+	[ "$changed" = 1 ] && /etc/init.d/network reload >/dev/null 2>&1
 }
 
 # ── actions ────────────────────────────────────────────────────────────────
@@ -102,31 +117,21 @@ do_up() {
 	local m=$(mode) a=$(apn)
 	[ -n "$a" ] || { echo '{"ok":false,"error":"APN empty"}'; return 1; }
 	ensure_usb_mode "$(usbmode_for "$m")" || { echo '{"ok":false,"error":"usb mode switch failed"}'; return 1; }
-	case "$m" in
-		ecm)
-			ubus call fm160 dial_config "{\"apn\":\"$a\",\"pdp\":\"$(pdp_for)\",\"cid\":1}" >/dev/null 2>&1
-			ubus call fm160 dial_start >/dev/null 2>&1 ;;
-		qmap)
-			ST=46; [ "$(v4)" = 0 ] && ST=6; [ "$(v6)" = 0 ] && ST=4
-			qmap-up.sh "$(channels)" "$a" "$ST" >/dev/null 2>&1 &
-			( sleep 40; v6_fix ) >/dev/null 2>&1 &
-			# ifup 事件触发 fm160-prefix 时拨号还没配好 IP，延后重刷一次
-			( sleep 50; /etc/init.d/fm160-prefix reload ) >/dev/null 2>&1 & ;;
-		mbim)
-			mbim-up.sh "$a" "$(mbim_iptype)" >/dev/null 2>&1 &
-			( sleep 20; /etc/init.d/fm160-prefix reload ) >/dev/null 2>&1 & ;;
-	esac
+	[ "$m" = ecm ] && {
+		ubus call fm160 dial_config "{\"apn\":\"$a\",\"pdp\":\"$(pdp_for)\",\"cid\":1}" >/dev/null 2>&1
+		ubus call fm160 dial_start >/dev/null 2>&1
+	}
 	netif_sync "$m"
+	# 真正的拨号由 proto *_fm160 的 setup 完成；ifup 是异步的
+	ifup fm160 2>/dev/null || ubus call network.interface.fm160 up >/dev/null 2>&1
 	echo '{"ok":true}'
 }
 
 do_down() {
-	case "$(mode)" in
-		ecm)  ubus call fm160 dial_stop >/dev/null 2>&1 ;;
-		qmap) qmap-down.sh >/dev/null 2>&1 ;;
-		mbim) mbim-down.sh >/dev/null 2>&1 ;;
-	esac
-	# proto none 的 fm160 接口不产生 ifdown 事件，主动收回 LAN 侧运营商前缀
+	local m=$(mode)
+	[ "$m" = ecm ] && ubus call fm160 dial_stop >/dev/null 2>&1
+	ifdown fm160 2>/dev/null || ubus call network.interface.fm160 down >/dev/null 2>&1
+	# proto teardown 里也会 withdraw，这里是接口段缺失时的兜底
 	/etc/init.d/fm160-prefix withdraw >/dev/null 2>&1
 	echo '{"ok":true}'
 }

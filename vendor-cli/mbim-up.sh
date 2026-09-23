@@ -1,7 +1,7 @@
 #!/bin/sh
 # FM160 原厂 MBIM 拨号（复刻 Fibocom ECM&NCM&RNDIS&MBIM 拨号集成指导 V1.8 §5.5）
 # 前置：模块已切 MBIM 模式（GTUSBMODE 30），cdc_mbim 驱动已枚举 wwan0 + /dev/cdc-wdm0
-# 用法：mbim-up.sh [APN] [ip-type: ipv4v6|ipv4|ipv6]     默认 ctnet、ipv4v6
+# 用法：mbim-up.sh [APN] [ip-type: ipv4v6|ipv4|ipv6] [configure|report]   默认 ctnet、ipv4v6、configure
 set -e
 APN=${1:-ctnet}
 IPTYPE=${2:-ipv4v6}
@@ -30,7 +30,7 @@ log "发起 MBIM 连接 apn=$APN ip-type=$IPTYPE"
 mbimcli -p -d "$DEV" --connect="session-id=0,apn=$APN,ip-type=$IPTYPE" >>"$LOG" 2>&1 || {
 	log "connect 失败"; exit 1; }
 
-# 3. 把拿到的 IP 配到网卡（复刻 mbim-set-ip）
-/usr/sbin/mbim-set-ip.sh "$DEV" "$IF" session-id=0 >>"$LOG" 2>&1 || exit 1
+# 3. 把拿到的 IP 配到网卡（复刻 mbim-set-ip；第 3 参 report 时只写 env 不碰网卡，供 netifd proto fm160 用）
+/usr/sbin/mbim-set-ip.sh "$DEV" "$IF" session-id=0 "${3:-configure}" >>"$LOG" 2>&1 || exit 1
 
 log "MBIM 拨号完成：ifconfig $IF 应已拿到地址"
