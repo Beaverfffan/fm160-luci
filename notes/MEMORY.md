@@ -148,3 +148,4 @@
 - FM160 短信插件层验收+三修〔§42，`2026-09-22.md` §17〕；构建树 vs HEAD 比对法〔§43〕
 - 面板/Doom 背光亮无画面先量 `…/spi0/statistics/bytes`（LVGL/DRM +153.6k；`/dev/fb0` 假信号）；调面板不刷固件 〔§12–13/15–16〕
 - FM160 luci-app-fm160〔`2026-09-23.md` §25–25.2〕v7 已刷；概览 Radio 交叉验证区块**常显**（无数据行显 '-' 不整块消失）+「Last capture:」时间戳 + 手动 Refresh（写 oplog）；30s 独立节奏 captureRadio() busy 防重入；**GTCELLSCAN 本固件不可用**（阻塞 ~50s 零结果）⇒ 邻区/CA 用 GTCCINFO?+GTCAINFO?；**中文翻译只在 ipk（lmo）里**，scp 部署仅更 JS；commit `3a8e628` CI 绿
+- FM160 mwan3〔`2026-09-23.md` §25.3〕★ 自注册按事实发现：wired=ethN device、mobile=proto *_fm160；**只删 fm160_managed 段**（旧 keyword 脚本会灭用户配置）；★ v6 靠 proto-none 伴随接口（mwan3 一族一 section）；★ **uci commit network 后必须 network reload** 否则 netifd 看不见新 section；★ `uci set "k='v'"` 引号会进值；★ mwan3 默认配置自带 wan/wanb section+member，接管 wired 时别误删非托管段；commit `99fac2c` CI 绿
