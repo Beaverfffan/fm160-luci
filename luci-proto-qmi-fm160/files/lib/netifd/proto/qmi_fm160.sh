@@ -63,7 +63,7 @@ proto_qmi_fm160_setup() {
 	qmap-up.sh "$(fm160_chans)" "$(fm160_apn)" "$ST" >/dev/null 2>&1 &
 	dev=$(fm160_wait_dev) || {
 		proto_notify_error "$config" "NO_DATA_DEV"
-		proto_block_restart
+		proto_block_restart "$config"
 		return
 	}
 	# 必须先拉起设备：fibocom-dial 守护进程只在接口 UP 后才往网卡落配置
@@ -132,6 +132,7 @@ proto_qmi_fm160_setup() {
 
 	proto_send_update "$config"
 	fm160_log "$config: qmap link up on $dev v4=${IP4ADDR:-none} v6=${IP6ADDR:-none}"
+	/usr/sbin/fm160-oplog add netifd 链路建立 "QMAP 拨号成功 v4=${IP4ADDR:-无} v6=${IP6ADDR:-无}" 已连接
 }
 
 proto_qmi_fm160_teardown() {
@@ -139,6 +140,7 @@ proto_qmi_fm160_teardown() {
 	qmap-down.sh >/dev/null 2>&1
 	/etc/init.d/fm160-prefix withdraw >/dev/null 2>&1
 	fm160_log "$config: teardown done"
+	/usr/sbin/fm160-oplog add netifd 链路拆除 "QMAP 连接已断开" 已断开
 }
 
 add_protocol qmi_fm160

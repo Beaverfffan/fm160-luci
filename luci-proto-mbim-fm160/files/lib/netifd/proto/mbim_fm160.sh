@@ -43,19 +43,19 @@ proto_mbim_fm160_setup() {
 	done
 	[ -c /dev/cdc-wdm0 ] || {
 		proto_notify_error "$config" "NO_CDC_WDM"
-		proto_block_restart
+		proto_block_restart "$config"
 		return
 	}
 
 	rm -f /var/run/fm160-mbim.env
 	if ! mbim-up.sh "$apn" "$iptype" report; then
 		proto_notify_error "$config" "DIAL_FAILED"
-		proto_block_restart
+		proto_block_restart "$config"
 		return
 	fi
 	[ -f /var/run/fm160-mbim.env ] || {
 		proto_notify_error "$config" "NO_IP_CONFIG"
-		proto_block_restart
+		proto_block_restart "$config"
 		return
 	}
 	. /var/run/fm160-mbim.env
@@ -63,7 +63,7 @@ proto_mbim_fm160_setup() {
 	local dev="$iface"
 	[ -d "/sys/class/net/$dev" ] || {
 		proto_notify_error "$config" "NO_DEV"
-		proto_block_restart
+		proto_block_restart "$config"
 		return
 	}
 	ip link set dev "$dev" up
@@ -98,6 +98,7 @@ proto_mbim_fm160_setup() {
 
 	proto_send_update "$config"
 	fm160_log "$config: mbim link up on $dev v4=${IP4ADDR:-none} v6=${IP6ADDR:-none}"
+	/usr/sbin/fm160-oplog add netifd 链路建立 "MBIM 拨号成功 v4=${IP4ADDR:-无} v6=${IP6ADDR:-无}" 已连接
 }
 
 proto_mbim_fm160_teardown() {
@@ -106,6 +107,7 @@ proto_mbim_fm160_teardown() {
 	# 链路拆除时立刻收回 LAN 侧运营商前缀
 	/etc/init.d/fm160-prefix withdraw >/dev/null 2>&1
 	fm160_log "$config: teardown done"
+	/usr/sbin/fm160-oplog add netifd 链路拆除 "MBIM 连接已断开" 已断开
 }
 
 add_protocol mbim_fm160

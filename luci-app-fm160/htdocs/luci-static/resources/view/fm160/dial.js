@@ -63,6 +63,32 @@ function fmtBytes(n) {
 	return n + ' B';
 }
 
+/* Keepalive status rows for the connection table. */
+var KA_STATE = {
+	idle:    _('idle'),
+	running: _('running'),
+	stopped: _('stopped (given up)'),
+	disabled: _('disabled'),
+	dead:    _('died unexpectedly')
+};
+
+function kaRows(ka) {
+	if (!ka || ka.enable === undefined)
+		return [ row(_('Keepalive'), _('not installed')) ];
+	var stateTxt = KA_STATE[ka.state] || ka.state || _('idle');
+	var lastTxt = ka.last_check || '—';
+	if (ka.last_targets)
+		lastTxt = '%s (%s)'.format(lastTxt, ka.last_targets);
+	return [
+		row(_('Keepalive'), ka.enable ? stateTxt : _('disabled')),
+		row(_('Last check'), lastTxt),
+		row(_('Failed rounds'),
+			_('%d consecutive / %d in 24 h / %d total').format(
+				ka.consec_fail || 0, ka.window_rounds || 0, ka.total_rounds || 0)),
+		row(_('Module reloads'), String(ka.reloads || 0))
+	];
+}
+
 /* --- backend ------------------------------------------------------------ */
 
 function ctlStatus() {
@@ -176,7 +202,7 @@ return view.extend({
 						d.netif ?
 							_('yes (proto %s)').format(d.netif_proto || '?') :
 							_('not yet (connect once to create it)'))
-				]),
+					].concat(kaRows(d.keepalive || {}))),
 				E('div', { 'class': 'right' }, [ btn ])
 			]));
 	},
@@ -231,6 +257,32 @@ return view.extend({
 		var autoChk = E('input', { 'type': 'checkbox', 'name': 'dial_autostart' });
 		if ((d.autostart === undefined ? 0 : d.autostart) === 1) autoChk.checked = true;
 
+		/* --- keepalive fields ---------------------------------------------- */
+		var ka = d.keepalive || {};
+		var kaChk = E('input', { 'type': 'checkbox', 'name': 'ka_enable' });
+		if ((ka.enable === undefined ? 1 : ka.enable) === 1) kaChk.checked = true;
+
+		var kaInterval = E('input', {
+			'type': 'text', 'class': 'cbi-input-text', 'style': 'width:6em',
+			'value': ka.interval || '30'
+		});
+		var kaReload = E('input', {
+			'type': 'text', 'class': 'cbi-input-text', 'style': 'width:6em',
+			'value': ka.reload_rounds || '5'
+		});
+		var kaStop = E('input', {
+			'type': 'text', 'class': 'cbi-input-text', 'style': 'width:6em',
+			'value': ka.stop_rounds || '10'
+		});
+		var kaDns4 = E('input', {
+			'type': 'text', 'class': 'cbi-input-text', 'style': 'width:16em',
+			'value': ka.dns4 || '', 'placeholder': _('auto (module DNS)')
+		});
+		var kaDns6 = E('input', {
+			'type': 'text', 'class': 'cbi-input-text', 'style': 'width:16em',
+			'value': ka.dns6 || '', 'placeholder': _('auto (module DNS)')
+		});
+
 		function modeIs(m) {
 			var r = modeBox.querySelector('input[name=dial_mode]:checked');
 			return r && r.value === m;
@@ -251,9 +303,46 @@ return view.extend({
 			'click': ui.createHandlerFn(this, 'onSave', {
 				modeBox: modeBox, apnInput: apnInput,
 				v4Chk: v4Chk, v6Chk: v6Chk, chanSelect: chanSelect,
-				prefixChk: prefixChk, autoChk: autoChk
+				prefixChk: prefixChk, autoChk: autoChk,
+				kaChk: kaChk, kaInterval: kaInterval, kaReload: kaReload,
+				kaStop: kaStop, kaDns4: kaDns4, kaDns6: kaDns6
 			})
 		}, _('Save settings'));
+
+		var kaForm = E('div', { 'class': 'cbi-section', 'style': 'margin-top:10px' }, [
+			E('h3', {}, _('Keepalive (link watchdog)')),
+			E('table', { 'class': 'table' }, [
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td', 'style': 'width:34%' }, _('Enable keepalive')),
+					E('td', { 'class': 'td' }, kaChk)
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, _('Check interval (seconds)')),
+					E('td', { 'class': 'td' }, kaInterval)
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, _('Reload module after N consecutive failed rounds')),
+					E('td', { 'class': 'td' }, kaReload)
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, _('Give up after N rounds within 24 h')),
+					E('td', { 'class': 'td' }, kaStop)
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, _('Ping target IPv4 (empty = module DNS)')),
+					E('td', { 'class': 'td' }, kaDns4)
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td' }, _('Ping target IPv6 (empty = module DNS)')),
+					E('td', { 'class': 'td' }, kaDns6)
+				])
+			]),
+			E('p', { 'class': 'hint' }, [
+				_('Every interval the module-reported DNS is pinged over the carrier path (IPv4/IPv6 honouring the stack toggles).'),
+				' ',
+				_('A failed round triggers a redial; after the consecutive-failure threshold the module USB profile is bounced and reloaded; after the 24 h budget is exhausted the watchdog stops by itself.')
+			])
+		]);
 
 		var form = E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, _('Dial settings')),
@@ -292,7 +381,7 @@ return view.extend({
 		/* initial visibility */
 		setTimeout(refreshModeFields, 0);
 
-		return form;
+		return E('div', {}, [ form, kaForm ]);
 	},
 
 	onSave: function(fields, ev) {
@@ -311,6 +400,27 @@ return view.extend({
 			return;
 		}
 
+		var kaInt = parseInt(fields.kaInterval.value, 10);
+		var kaRel = parseInt(fields.kaReload.value, 10);
+		var kaStp = parseInt(fields.kaStop.value, 10);
+		var ka4 = fields.kaDns4.value.trim();
+		var ka6 = fields.kaDns6.value.trim();
+		if (isNaN(kaInt) || kaInt < 10 || kaInt > 600) {
+			fail(_('Check interval must be 10-600 seconds.')); return;
+		}
+		if (isNaN(kaRel) || kaRel < 2 || kaRel > 50) {
+			fail(_('Module reload threshold must be 2-50 rounds.')); return;
+		}
+		if (isNaN(kaStp) || kaStp < 2 || kaStp > 100) {
+			fail(_('Give-up threshold must be 2-100 rounds.')); return;
+		}
+		if (ka4 && !/^[0-9.]+$/.test(ka4)) {
+			fail(_('IPv4 ping target may only contain digits and dots (or empty).')); return;
+		}
+		if (ka6 && ka6.indexOf(':') < 0) {
+			fail(_('IPv6 ping target must be an IPv6 address (or empty).')); return;
+		}
+
 		var ops = [
 			[ 'set', 'dial_mode', mode ],
 			[ 'set', 'dial_apn', apn ],
@@ -318,7 +428,13 @@ return view.extend({
 			[ 'set', 'dial_v6', fields.v6Chk.checked ? '1' : '0' ],
 			[ 'set', 'qmap_channels', fields.chanSelect.value ],
 			[ 'set', 'dial_autostart', fields.autoChk.checked ? '1' : '0' ],
-			[ 'set', 'lan_ipv6', fields.prefixChk.checked ? '1' : '0' ]
+			[ 'set', 'lan_ipv6', fields.prefixChk.checked ? '1' : '0' ],
+			[ 'set', 'ka_enable', fields.kaChk.checked ? '1' : '0' ],
+			[ 'set', 'ka_interval', String(kaInt) ],
+			[ 'set', 'ka_reload_rounds', String(kaRel) ],
+			[ 'set', 'ka_stop_rounds', String(kaStp) ],
+			[ 'set', 'ka_dns4', ka4 ],
+			[ 'set', 'ka_dns6', ka6 ]
 		];
 
 		var chain = Promise.resolve();

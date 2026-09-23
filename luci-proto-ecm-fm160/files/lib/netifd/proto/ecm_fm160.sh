@@ -38,7 +38,7 @@ proto_ecm_fm160_setup() {
 	done
 	[ -d "/sys/class/net/$iface" ] || {
 		proto_notify_error "$config" "NO_DEV"
-		proto_block_restart
+		proto_block_restart "$config"
 		return
 	}
 	ip link set dev "$iface" up
@@ -60,6 +60,7 @@ proto_ecm_fm160_setup() {
 			"$iface" "$(fm160_v4)" "$(fm160_v6)"
 	fi
 	fm160_log "$config: ecm link setup on $iface (v4=$(fm160_v4) v6=$(fm160_v6))"
+	/usr/sbin/fm160-oplog add netifd 链路建立 "ECM 拨号已发起 v4=$(fm160_v4) v6=$(fm160_v6)，地址由模组 DHCP/RA 下发" 进行中
 }
 
 proto_ecm_fm160_teardown() {
@@ -67,6 +68,7 @@ proto_ecm_fm160_teardown() {
 	proto_kill_command "$config"
 	/etc/init.d/fm160-prefix withdraw >/dev/null 2>&1
 	fm160_log "$config: teardown done"
+	/usr/sbin/fm160-oplog add netifd 链路拆除 "ECM 连接已断开" 已断开
 }
 
 add_protocol ecm_fm160

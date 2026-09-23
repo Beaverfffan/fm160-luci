@@ -65,6 +65,14 @@
 			"path": "fm160/sms"
 		}
 	},
+	"admin/fm160/logs": {
+		"title": "Operations Log",
+		"order": 80,
+		"action": {
+			"type": "view",
+			"path": "fm160/logs"
+		}
+	},
 	"admin/fm160/debug": {
 		"title": "AT Console",
 		"order": 90,

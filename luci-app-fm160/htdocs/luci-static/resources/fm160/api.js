@@ -1,6 +1,7 @@
 'use strict';
 'require baseclass';
 'require rpc';
+'require fs';
 
 /*
  * Thin wrapper around the fm160 ubus object.
@@ -1363,6 +1364,165 @@ function profileRefused(rows, advanced) {
 	});
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Radio cross-check queries (AT manual §5.8/5.15/5.17/5.20/8.22).
+ *
+ * These run live AT commands through fm160d's single AT owner, so they are
+ * only issued from pages the user has open, on a 5 s cadence, and every
+ * result is parsed defensively: the manual's bracketed fields are optional
+ * and the module omits whole blocks (e.g. QCI on this firmware) when it has
+ * nothing to report.
+ * ------------------------------------------------------------------------ */
+
+/* +GTCCINFO? -> LTE service cell line:
+ * svc,rat,mcc,mnc,tac,cellid,earfcn,pci,band,bw,rssnr,rxlev,rsrp,rsrq
+ * NR service cell: same with narfcn + ss-* fields. */
+function parseCcinfo(text) {
+	var m = /(?:^|\n)(?:LTE|NR)[^\n]*service cell:\s*\r?\n?([0-9a-fA-F,]+)/.exec(text || '');
+	if (!m) return null;
+	var f = m[1].split(',');
+	if (f.length < 14) return null;
+	var rat = parseInt(f[1], 10);
+	return {
+		rat:    rat,
+		ratName: ({4:'LTE',5:'eMTC',6:'NB-IoT'})[rat] || (rat >= 4 ? 'LTE' : 'RAT' + rat),
+		nr:     /NR/i.test(m[0]),
+		mcc:    f[2], mnc: f[3],
+		tac:    f[4], cellid: f[5],
+		arfcn:  parseInt(f[6], 16) || 0, pci: parseInt(f[7], 16) || 0,
+		band:   f[8], bwCode: parseInt(f[9], 10),
+		snr:    parseInt(f[10], 10), rxlev: parseInt(f[11], 10),
+		rsrp:   parseInt(f[12], 10), rsrq: parseInt(f[13], 10)
+	};
+}
+
+/* +GTCAINFO? -> "PCC: b,pci,arfcn,dlbw,dlm,ulm,dlmod,ulmod,rsrp" plus
+ * optional "SCCn: state,ulcfg,band,pci,arfcn,dlbw,ulbw,dlm,ulm,dlmod,ulmod,rsrp".
+ * Band codes: LTE 101->B1..171->B71; NR 501->n1..509->n9, 5010->n10.. */
+function caBandName(code) {
+	code = parseInt(code, 10);
+	if (code >= 101 && code <= 171) return 'B' + (code - 100);
+	if (code >= 501 && code <= 509) return 'n' + (code - 500);
+	if (code >= 5010) return 'n' + (code - 5000);
+	return String(code);
+}
+
+function caBwMHz(code) {
+	code = parseInt(code, 10);
+	var lte = {6:'1.4',15:'3',25:'5',50:'10',75:'15',100:'20'};
+	return lte[code] || (code > 0 ? code : null);   /* NR 直接报 MHz */
+}
+
+function parseCainfo(text) {
+	var out = { pcc: null, scc: [] };
+	var re = /(PCC|SCC\d+):\s*([0-9a-fA-F,]+)/g, m;
+	while ((m = re.exec(text || '')) !== null) {
+		var f = m[2].split(',');
+		if (m[1] === 'PCC' && f.length >= 9) {
+			out.pcc = {
+				band: caBandName(f[0]), pci: parseInt(f[1], 16) || 0,
+				arfcn: parseInt(f[2], 16) || 0, bw: caBwMHz(f[3]),
+				dlMimo: f[4], ulMimo: f[5],
+				dlMod: caModName(f[6]), ulMod: caModName(f[7]),
+				rsrp: parseInt(f[8], 10)
+			};
+		} else if (m[1] !== 'PCC' && f.length >= 12) {
+			out.scc.push({
+				id: m[1],
+				state: f[0] === '2' ? 'active' : (f[0] === '1' ? 'configured' : f[0]),
+				ulCa: f[1] === '1',
+				band: caBandName(f[2]), pci: parseInt(f[3], 16) || 0,
+				arfcn: parseInt(f[4], 16) || 0, dlBw: caBwMHz(f[5]), ulBw: caBwMHz(f[6]),
+				dlMimo: f[7], ulMimo: f[8],
+				dlMod: caModName(f[9]), ulMod: caModName(f[10]),
+				rsrp: parseInt(f[11], 10)
+			});
+		}
+	}
+	return out;
+}
+
+function caModName(code) {
+	return ({0:'BPSK',1:'QPSK',2:'16QAM',3:'64QAM',4:'256QAM',5:'1024QAM',6:'?'})[String(parseInt(code,10))] || code;
+}
+
+/* +GTCELLINFO? -> mode + [LTE: CQI/Power/RANK/DLMCS/ULMCS [QCI]] [NR5G: ...] */
+function parseCellinfo(text) {
+	var out = { mode: null, lte: null, nr: null };
+	var m = /\+GTCELLINFO:\s*(\d+)/.exec(text || '');
+	if (m) out.mode = parseInt(m[1], 10);
+	var lte = /LTE:\s*\r?\n?CQI:\s*(\d+)\s*\r?\n?Power:\s*([-\d]+)\s*\r?\n?RANK:\s*(\S+)\s*\r?\n?DLMCS:\s*(\d+)\s*\r?\n?ULMCS:\s*(\d+)(?:\s*\r?\n?TX_LTE_QCI:\s*(\d+)\s*\r?\n?RX_LTE_QCI:\s*(\d+))?/.exec(text || '');
+	if (lte) out.lte = { cqi:+lte[1], power:+lte[2], rank:lte[3], dlmcs:+lte[4], ulmcs:+lte[5], txQci:lte[6]||null, rxQci:lte[7]||null };
+	var nr = /NR5G:\s*\r?\n?SSB_BeamID:\s*(\d+)\s*\r?\n?NR_CQI:\s*(\d+)\s*\r?\n?NR_Power:\s*([-\d]+)\s*\r?\n?NR_RANK:\s*(\S+)\s*\r?\n?NR_DLMCS:\s*(\d+)\s*\r?\n?NR_ULMCS:\s*(\d+)(?:\s*\r?\n?TX_5G_QCI:\s*(\d+)\s*\r?\n?RX_5G_QCI:\s*(\d+))?/.exec(text || '');
+	if (nr) out.nr = { beam:+nr[1], cqi:+nr[2], power:+nr[3], rank:nr[4], dlmcs:+nr[5], ulmcs:+nr[6], txQci:nr[7]||null, rxQci:nr[8]||null };
+	return out;
+}
+
+/* +GTSTATIS? -> rx_rate,tx_rate,rx_bytes,tx_bytes (bytes/s, bytes) */
+function parseStatis(text) {
+	var m = /\+GTSTATIS:\s*(\d+),(\d+),(\d+),(\d+)/.exec(text || '');
+	if (!m) return null;
+	return { rxRate:+m[1], txRate:+m[2], rxBytes:+m[3], txBytes:+m[4] };
+}
+
+/* +COPS? -> mode,format,operator,act */
+var COPS_ACT = {0:'GSM',1:'GSM',2:'UTRAN',3:'GSM EGPRS',4:'UTRAN HSDPA',5:'UTRAN HSUPA',6:'UTRAN HSPA',7:'LTE'};
+
+function parseCops(text) {
+	var m = /\+COPS:\s*(\d+),(\d+),?"?([^,"\r\n]*)"?,?(\d*)/.exec(text || '');
+	if (!m) return null;
+	return { mode:+m[1], format:+m[2], operator:m[3] || '', act:m[4] === '' ? null : +m[4] };
+}
+
+function copsActName(act) {
+	return (act === null || act === undefined) ? null : (COPS_ACT[act] || ('act ' + act));
+}
+
+/* Unified semantic operation log (fm160-oplog ring buffer). */
+function opLog(action, detail, result) {
+	return fs.exec('/usr/sbin/fm160-oplog', [ 'add', 'ui', action, detail || '', result || '' ]).catch(function() {});
+}
+
+function opLogTail(n) {
+	return fs.exec('/usr/sbin/fm160-oplog', [ 'tail', String(n || 50) ]).then(function(res) {
+		var lines = ((res && res.stdout) || '').split('\n').filter(function(l) { return l; });
+		return lines.map(function(l) {
+			try { return JSON.parse(l); } catch (e) { return null; }
+		}).filter(function(e) { return e; });
+	}).catch(function() { return []; });
+}
+
+function opLogClear() {
+	return fs.exec('/usr/sbin/fm160-oplog', [ 'clear' ]).catch(function() {});
+}
+
+/*
+ * Logged write wrappers.  Every user-triggered state change that the daemon
+ * does not already record on its own gets one semantic entry here: fired
+ * before the call ("initiated") and, when the promise settles, rewritten
+ * with the outcome ("ok" / the failure reason).  The result line is what
+ * makes the operations log worth reading - "sms send to 186..." with a
+ * trailing "error: ..." tells the whole story without the daemon log.
+ *
+ * dial up/down and keepalive verdicts are logged server-side by
+ * fm160-dial-ctl / fm160-keepalive, so those exports stay unwrapped to
+ * avoid duplicate entries.
+ */
+function logged(call, action, detailOf, args) {
+	var detail = detailOf ? detailOf.apply(null, args) : '';
+
+	opLog(action, detail, 'initiated');
+
+	return call.apply(null, args).then(function(res) {
+		opLog(action, detail, 'ok');
+		return res;
+	}, function(err) {
+		opLog(action, detail, 'error: ' + String(err && err.message || err));
+		throw err;
+	});
+}
+
 return baseclass.extend({
 	USB_MODES: USB_MODES,
 	USB_PLATFORM: USB_PLATFORM,
@@ -1377,19 +1537,53 @@ return baseclass.extend({
 	identity: callIdentity,
 	profile: callProfile,
 	at: callAt,
-	rescan: callRescan,
-	ident: callIdent,
-	setEnabled: callEnabled,
-	setBands: callSetBands,
-	setCellLock: callSetCellLock,
-	setGnss: callSetGnss,
-	setGnssCfg: callSetGnssCfg,
+	rescan: function() {
+		return logged(callRescan, _('USB rescan'), null, arguments);
+	},
+	ident: function() {
+		return logged(callIdent, _('identity re-read'), null, arguments);
+	},
+	setEnabled: function(enabled) {
+		return logged(callEnabled, enabled ? _('management resume') : _('management pause'),
+			function(v) { return 'enabled=' + (v ? '1' : '0'); }, arguments);
+	},
+	setBands: function(bands) {
+		return logged(callSetBands, _('band lock change'),
+			function(b) { return 'bands=' + JSON.stringify(b); }, arguments);
+	},
+	setCellLock: function(mode, rat, type, earfcn, pci, scs, nrband) {
+		return logged(callSetCellLock, mode ? _('cell lock set') : _('cell lock clear'),
+			function(m, r, t, e, p) {
+				return 'mode=' + m + ' rat=' + r + ' type=' + t +
+					' earfcn=' + e + ' pci=' + p;
+			}, arguments);
+	},
+	setGnss: function(enabled) {
+		return logged(callSetGnss, enabled ? _('GNSS power on') : _('GNSS power off'),
+			function(v) { return 'enabled=' + (v ? '1' : '0'); }, arguments);
+	},
+	setGnssCfg: function(constellation) {
+		return logged(callSetGnssCfg, _('GNSS config change'),
+			function(c) { return 'constellation=' + c; }, arguments);
+	},
 	/* M3 */
 	smsList: callSmsList,
-	smsSend: callSmsSend,
-	smsDelete: callSmsDelete,
-	smsMarkRead: callSmsRead,
-	smsSync: callSmsSync,
+	smsSend: function(number, text) {
+		return logged(callSmsSend, _('SMS send'),
+			function(n, t) { return 'to=' + n + ' chars=' + String(t || '').length; },
+			arguments);
+	},
+	smsDelete: function(id) {
+		return logged(callSmsDelete, _('SMS delete'),
+			function(i) { return 'id=' + i; }, arguments);
+	},
+	smsMarkRead: function(id) {
+		return logged(callSmsRead, _('SMS mark read'),
+			function(i) { return 'id=' + i; }, arguments);
+	},
+	smsSync: function() {
+		return logged(callSmsSync, _('SMS sync'), null, arguments);
+	},
 
 	/* M6 */
 	diagnostics: callDiagnostics,
@@ -1511,7 +1705,11 @@ return baseclass.extend({
 	dialStop: callDialStop,
 	dialConfig: callDialConfig,
 	profiles: callProfiles,
-	setUsbMode: callSetUsbMode,
+	setUsbMode: function(mode, advanced) {
+		return logged(callSetUsbMode, _('USB mode switch'),
+			function(m, a) { return 'mode=' + m + ' advanced=' + (a ? '1' : '0'); },
+			arguments);
+	},
 	dialOf: dialOf,
 	dialUp: dialUp,
 	dialStep: dialStep,
@@ -1586,5 +1784,44 @@ return baseclass.extend({
 	/* Modes the modem reports that we cannot classify - callers must confirm. */
 	unknownSupported: function(supported) {
 		return (supported || []).filter(function(m) { return !usbModeKnown(m); });
-	}
+	},
+
+	/* Live radio cross-check (AT manual §5.8/5.15/5.17/5.20/8.22).  Each call
+	 * issues 5 AT commands through fm160d; use on a 5 s poll, not faster. */
+	radio: function() {
+		function at(cmd, timeout) {
+			return callAt({ cmd: cmd, timeout: timeout || 8000 }).then(function(r) {
+				return (r && r.response) || '';
+			}).catch(function() { return ''; });
+		}
+		return at('AT+GTCCINFO?').then(function(cc) {
+			return at('AT+GTCAINFO?').then(function(ca) {
+				return at('AT+GTSTATIS?').then(function(st) {
+					return at('AT+COPS?').then(function(cops) {
+						return at('AT+GTCELLINFO?').then(function(ci) {
+							return {
+								ccinfo:  parseCcinfo(cc),
+								cainfo:  parseCainfo(ca),
+								statis:  parseStatis(st),
+								cops:    parseCops(cops),
+								cellinfo:parseCellinfo(ci),
+								at:      { cc:cc, ca:ca, st:st, cops:cops, ci:ci }
+							};
+						});
+					});
+				});
+			});
+		});
+	},
+
+	caBandName: caBandName,
+	copsActName: copsActName,
+	parseCcinfo: parseCcinfo,
+	parseCainfo: parseCainfo,
+	parseCellinfo: parseCellinfo,
+	parseStatis: parseStatis,
+	parseCops: parseCops,
+	opLog: opLog,
+	opLogTail: opLogTail,
+	opLogClear: opLogClear
 });

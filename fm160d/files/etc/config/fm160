@@ -68,6 +68,21 @@ config fm160 'main'
 	# moment of dialling, where the trade-off is legible.
 	option dial_autostart '0'
 
+	# ----------------------------------------------------------------
+	# Keepalive (link watchdog)
+	# ----------------------------------------------------------------
+
+	# After the link is up, /usr/sbin/fm160-keepalive pings the module-reported
+	# DNS (v4/v6 honouring the stack toggles) every ka_interval seconds.
+	# A failed round redials; ka_reload_rounds consecutive failures bounce the
+	# USB profile (module reload) and redial; ka_stop_rounds failed rounds
+	# inside a sliding 24 h window make the watchdog give up and report.
+	# ka_dns4/ka_dns6 override the ping targets per family (unset = auto).
+	option ka_enable '1'
+	option ka_interval '30'
+	option ka_reload_rounds '5'
+	option ka_stop_rounds '10'
+
 	# Let the reconnect ladder end in AT+CFUN=1,1 (a module reset).  Off by
 	# default, and the default is the safety property: with it off the
 	# ladder stops and reports instead of rebooting the module on a timer.

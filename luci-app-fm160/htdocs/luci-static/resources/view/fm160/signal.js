@@ -39,7 +39,12 @@ function metric(title, value, sub, pct) {
 
 return view.extend({
 	load: function() {
-		return api.status();
+		this.radio = null;
+		this.radioAt = 0;
+		return Promise.all([ api.status(), api.radio() ]).then(function(r) {
+			this.radio = r[1];
+			return r[0];
+		}.bind(this));
 	},
 
 	render: function(state) {
@@ -56,7 +61,21 @@ return view.extend({
 				poll.stop();
 				return Promise.resolve();
 			}
-			return api.profile(true).then(api.status).then(function(s) {
+			/* Link adaptation (AT+GTCELLINFO) costs 5 AT commands per round,
+			 * so it refreshes on a 30 s cadence while the fast metrics keep
+			 * their 2 s rhythm. */
+			var wantRadio = (Date.now() - self.radioAt) > 30000;
+			var chain = api.profile(true).then(api.status);
+			if (wantRadio) {
+				chain = chain.then(function(s) {
+					return api.radio().then(function(r) {
+						self.radio = r;
+						self.radioAt = Date.now();
+						return s;
+					});
+				});
+			}
+			return chain.then(function(s) {
 				self.paint(s);
 			});
 		}, 2);
@@ -133,6 +152,38 @@ return view.extend({
 						E('td', { 'class': 'td' }, api.fmtDbm(crsrp)),
 						E('td', { 'class': 'td' }, crsrq === null ? '-' : (crsrq.toFixed(1) + ' dB')),
 						E('td', { 'class': 'td' }, csinr === null ? '-' : (csinr.toFixed(1) + ' dB'))
+					])
+				])
+			]));
+		}
+
+		/* Link adaptation / bearer QoS from AT+GTCELLINFO (§5.20).  QCI is an
+		 * optional bracketed field and this firmware omits it - show that
+		 * honestly instead of guessing. */
+		var ci = (this.radio && this.radio.cellinfo) || null;
+		var lci = ci && (ci.lte || ci.nr);
+		if (lci) {
+			this.tables.appendChild(E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Link adaptation (AT+GTCELLINFO)')),
+				E('table', { 'class': 'table' }, [
+					E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td', 'style': 'width:34%' }, _('CQI')),
+						E('td', { 'class': 'td' }, String(lci.cqi))
+					]),
+					E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td' }, _('Rank')),
+						E('td', { 'class': 'td' }, lci.rank)
+					]),
+					E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td' }, _('MCS DL / UL')),
+						E('td', { 'class': 'td' }, '%d / %d'.format(lci.dlmcs, lci.ulmcs))
+					]),
+					E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td' }, _('QCI TX / RX')),
+						E('td', { 'class': 'td' },
+							(lci.txQci !== null || lci.rxQci !== null) ?
+								'%s / %s'.format(lci.txQci || '-', lci.rxQci || '-') :
+								_('not reported by this firmware'))
 					])
 				])
 			]));

@@ -12,7 +12,21 @@ SID=${SID#session-id=}   # mbimcli --query-ip-configuration 只要裸数字
 MODE=${4:-configure}
 log() { echo "[mbim-set-ip] $*"; }
 
-OUT=$(mbimcli -p -d "$DEV" --query-ip-configuration="$SID" 2>&1) || {
+# busybox 没有 timeout：挂死端点上 mbimcli 会无限等，用后台+看门狗代替（25s 超时）
+mbim() {
+	"$@" &
+	local pid=$! i=0
+	while kill -0 $pid 2>/dev/null && [ $i -lt 25 ]; do sleep 1; i=$((i+1)); done
+	if kill -0 $pid 2>/dev/null; then
+		kill -9 $pid 2>/dev/null
+		log "mbimcli 看门狗超时（25s）: $*"
+		return 124
+	fi
+	wait $pid
+	return $?
+}
+
+OUT=$(mbim mbimcli -p -d "$DEV" --query-ip-configuration="$SID" 2>&1) || {
 	log "query-ip-configuration 失败：$OUT"; exit 1; }
 echo "$OUT"
 

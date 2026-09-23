@@ -53,6 +53,22 @@ if ! uci -q get fm160.main.dial_pdp >/dev/null; then
 	uci -q commit fm160
 fi
 
+# --- keepalive defaults -----------------------------------------------------
+#
+# Same missing-only rule as lan_ipv6/dial_pdp: fill the ka_* options only when
+# an upgrade left them absent.  An existing install gains the watchdog with
+# the documented defaults (30 s interval, redial every failed round, module
+# reload after 5 consecutive failures, give up after 10 rounds in 24 h, DNS
+# auto from what the module reports).  ka_dns4/ka_dns6 stay unset (empty =
+# auto) unless the user fills them from the UI.
+if ! uci -q get fm160.main.ka_enable >/dev/null; then
+	uci -q set fm160.main.ka_enable='1'
+	uci -q set fm160.main.ka_interval='30'
+	uci -q set fm160.main.ka_reload_rounds='5'
+	uci -q set fm160.main.ka_stop_rounds='10'
+	uci -q commit fm160
+fi
+
 # Enabled, and now actually doing something: the init script installs the
 # prefix on boot if the link is already up, and does nothing at all while
 # lan_ipv6 is 0.  It is enabled because the whole point of the option is that

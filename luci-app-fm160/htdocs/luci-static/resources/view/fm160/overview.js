@@ -108,7 +108,11 @@ return view.extend({
 				.then(api.status)
 				.then(function(s) {
 					self.state = s;
-					self.paint(s);
+					return api.radio();
+				})
+				.then(function(r) {
+					self.radio = r;
+					self.paint(self.state);
 				});
 		}, 2);
 
@@ -200,6 +204,56 @@ return view.extend({
 		}
 
 		this.body.appendChild(section(_('Traffic'), kv(traffic)));
+
+		/* Radio cross-check: operator act, serving band + CA, rates, MCS/QCI.
+		 * All values come straight from the module via the AT manual's
+		 * §5.8/5.15/5.17/5.20/8.22 queries; "-" means the module gave us
+		 * nothing to parse, which on this firmware includes the optional
+		 * QCI fields. */
+		var r = this.radio || {};
+		var ca = r.cainfo || {};
+		var st = r.statis || {};
+		var ci = r.cellinfo || {};
+		var cops = r.cops || {};
+		var pcc = ca.pcc;
+		var rows = [
+			[ _('Operator (AT+COPS)'),
+				(cops.operator || state.operator || '-') +
+				(cops.act !== null && cops.act !== undefined ?
+					' (' + (api.copsActName(cops.act) || cops.act) + ')' : '') ]
+		];
+		if (pcc) {
+			rows.push([ _('PCC band'), '%s, %s MHz, PCI %d'.format(
+				pcc.band, pcc.bw !== null ? pcc.bw : '?', pcc.pci) ]);
+			rows.push([ _('MIMO / modulation'),
+				_('DL %sx %s / UL %sx %s').format(pcc.dlMimo, pcc.dlMod, pcc.ulMimo, pcc.ulMod) ]);
+		}
+		if (ca.scc && ca.scc.length) {
+			ca.scc.forEach(function(sc) {
+				rows.push([ _(sc.id + ' (CA)'),
+					_('%s, %s MHz, PCI %d, %s').format(
+						sc.band, sc.dlBw !== null ? sc.dlBw : '?', sc.pci,
+						sc.state === 'active' ? _('active') : _('configured')) ]);
+			});
+		} else if (pcc) {
+			rows.push([ _('Carrier aggregation'), _('none (PCC only)') ]);
+		}
+		if (st) {
+			rows.push([ _('Module rate (AT+GTSTATIS)'),
+				_('down %s/s / up %s/s').format(api.fmtBytes(st.rxRate || 0), api.fmtBytes(st.txRate || 0)) ]);
+			rows.push([ _('Session total'), api.fmtBytes(st.rxBytes || 0) + ' / ' + api.fmtBytes(st.txBytes || 0) ]);
+		}
+		var lci = ci.lte || ci.nr;
+		if (lci) {
+			rows.push([ _('CQI / RANK / MCS'),
+				_('CQI %d, %s, DL MCS %d / UL MCS %d').format(lci.cqi, lci.rank, lci.dlmcs, lci.ulmcs) ]);
+			var qci = lci.txQci !== null || lci.rxQci !== null;
+			rows.push([ _('QCI'), qci ?
+				_('TX %s / RX %s').format(lci.txQci || '-', lci.rxQci || '-') :
+				_('not reported by this firmware') ]);
+		}
+		if (rows.length > 1)
+			this.body.appendChild(section(_('Radio (AT cross-check)'), kv(rows)));
 
 		this.footer.innerHTML = '';
 		if (state.port_found && state.at_state === 0)

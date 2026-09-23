@@ -8,7 +8,8 @@
 			},
 			"file": {
 				"/usr/libexec/fm160-prefix-lan.sh": [ "exec" ],
-				"/usr/sbin/fm160-dial-ctl": [ "exec" ]
+				"/usr/sbin/fm160-dial-ctl": [ "exec" ],
+				"/usr/sbin/fm160-oplog": [ "exec" ]
 			},
 			"uci": [ "fm160" ]
 		},
