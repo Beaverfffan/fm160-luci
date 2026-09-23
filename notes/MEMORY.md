@@ -147,3 +147,4 @@
 - FM160 短信〔`2026-09-22.md` §1–11〕★ **制式是自变量**：NR SA = `AT+CMGS` 本地 ~90 ms 秒拒；LTE = 提交下去 + **40 s T1_RP** 无应答（`ERROR` @ 40010 ms）；★ 我们这侧无罪（编码/长度/两阶段/SMSC 字段逐项自证，`CMGW` 同字节收下）；★ `+CSMS: 0,1,1,1` 模组自报支持 MO；★ 文本模式（mcuzone 参考）与 PDU 模式在两种制式下**结果相同**；★ 拨号两制式都停在 `dialing`；★ `AT+GTACT=2` = LTE only（持久、立即生效）；★ 工具 `sms_pdu_ref.py`（先算后发）+ 探针 260–280
 - FM160 短信插件层验收+三修〔§42，`2026-09-22.md` §17〕；构建树 vs HEAD 比对法〔§43〕
 - 面板/Doom 背光亮无画面先量 `…/spi0/statistics/bytes`（LVGL/DRM +153.6k；`/dev/fb0` 假信号）；调面板不刷固件 〔§12–13/15–16〕
+- FM160 luci-app-fm160〔`2026-09-23.md` §25–25.2〕v7 已刷；概览 Radio 交叉验证区块**常显**（无数据行显 '-' 不整块消失）+「Last capture:」时间戳 + 手动 Refresh（写 oplog）；30s 独立节奏 captureRadio() busy 防重入；**GTCELLSCAN 本固件不可用**（阻塞 ~50s 零结果）⇒ 邻区/CA 用 GTCCINFO?+GTCAINFO?；**中文翻译只在 ipk（lmo）里**，scp 部署仅更 JS；commit `3a8e628` CI 绿
