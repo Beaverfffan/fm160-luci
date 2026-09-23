@@ -77,6 +77,8 @@ msgstr ""
 #: view/fm160/gnss.js
 
 #: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
 msgid "\"In view\" is what the module itself reports, and \"parsed\" is how many of those satellites were actually present in the NMEA. They are shown side by side on purpose: if they differ, the answer was truncated, and that is a transport problem rather than a sky problem."
 msgstr "「可见」是模组自己报告的，而「已解析」是这些卫星里真正出现在 NMEA 中的数量。两者并排显示是有意为之：如果不一致，说明应答被截断了，那是传输问题而不是天空的问题。"
 
@@ -692,6 +694,7 @@ msgid "Failure check interval (s)"
 msgstr "故障检测间隔（秒）"
 
 #: view/fm160/mwan.js
+msgctxt "fm160 mwan3 table"
 msgid "Family"
 msgstr "协议族"
 
@@ -1013,12 +1016,10 @@ msgid "Messages the modem still holds will not come back on the next refresh, bu
 msgstr "模组仍持有的消息不会在下次刷新时回来，而只保存在这里的消息则会永久消失。"
 
 #: view/fm160/mwan.js
-msgctxt "fm160 mwan3"
 msgid "Mobile priority (metric)"
 msgstr "移动优先级（metric）"
 
 #: view/fm160/mwan.js
-msgctxt "fm160 mwan3"
 msgid "Mobile weight"
 msgstr "移动权重"
 
@@ -2043,12 +2044,10 @@ msgid "View"
 msgstr "查看"
 
 #: view/fm160/mwan.js
-msgctxt "fm160 mwan3"
 msgid "Wired priority (metric)"
 msgstr "有线优先级（metric）"
 
 #: view/fm160/mwan.js
-msgctxt "fm160 mwan3"
 msgid "Wired weight"
 msgstr "有线权重"
 
@@ -2348,7 +2347,6 @@ msgid "mbimcli over cdc_mbim. Best measured single-flow speed (15-20 MB/s on thi
 msgstr "mbimcli 跑在 cdc_mbim 上。实测单流速度最佳（此模组 15-20 MB/s）。"
 
 #: view/fm160/mwan.js
-msgctxt "fm160 mwan3 class"
 msgid "mobile"
 msgstr "移动"
 
@@ -2657,7 +2655,6 @@ msgid "waiting for registration"
 msgstr "等待注网"
 
 #: view/fm160/mwan.js
-msgctxt "fm160 mwan3 class"
 msgid "wired"
 msgstr "有线"
 

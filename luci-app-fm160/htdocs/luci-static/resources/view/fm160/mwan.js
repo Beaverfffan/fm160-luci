@@ -143,10 +143,10 @@ return view.extend({
 		this.container.appendChild(section(_('MWAN3 integration'), [
 			E('table', { 'class': 'table' }, [
 				row(_('Auto-register into mwan3'), this.inEnabled),
-				row(_('Wired priority (metric)', 'fm160 mwan3'), this.inWiredMetric),
-				row(_('Wired weight', 'fm160 mwan3'), this.inWiredWeight),
-				row(_('Mobile priority (metric)', 'fm160 mwan3'), this.inMobileMetric),
-				row(_('Mobile weight', 'fm160 mwan3'), this.inMobileWeight),
+				row(_('Wired priority (metric)'), this.inWiredMetric),
+				row(_('Wired weight'), this.inWiredWeight),
+				row(_('Mobile priority (metric)'), this.inMobileMetric),
+				row(_('Mobile weight'), this.inMobileWeight),
 				row(_('Track targets IPv4 (space separated)'), this.inTrack4),
 				row(_('Track targets IPv6 (space separated)'), this.inTrack6),
 				row(_('Ping count per round'), this.inCount),
@@ -186,7 +186,7 @@ return view.extend({
 			rows.push(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td' }, d.name),
 				E('td', { 'class': 'td' }, d.family),
-				E('td', { 'class': 'td' }, d.class === 'wired' ? _('wired', 'fm160 mwan3 class') : _('mobile', 'fm160 mwan3 class')),
+				E('td', { 'class': 'td' }, d.class === 'wired' ? _('wired') : _('mobile')),
 				E('td', { 'class': 'td' }, d.device || '-')
 			]));
 		});
@@ -197,7 +197,7 @@ return view.extend({
 			rows.length ? E('table', { 'class': 'table' }, [
 				E('tr', { 'class': 'tr' }, [
 					E('th', { 'class': 'th' }, _('Interface')),
-					E('th', { 'class': 'th' }, _('Family')),
+					E('th', { 'class': 'th' }, _('Family', 'fm160 mwan3 table')),
 					E('th', { 'class': 'th' }, _('Class')),
 					E('th', { 'class': 'th' }, _('Device'))
 				])
