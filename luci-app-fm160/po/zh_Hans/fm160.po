@@ -73,6 +73,8 @@ msgstr ""
 #: view/fm160/gnss.js
 
 #: view/fm160/gnss.js
+
+#: view/fm160/gnss.js
 msgid "\"In view\" is what the module itself reports, and \"parsed\" is how many of those satellites were actually present in the NMEA. They are shown side by side on purpose: if they differ, the answer was truncated, and that is a transport problem rather than a sky problem."
 msgstr "「可见」是模组自己报告的，而「已解析」是这些卫星里真正出现在 NMEA 中的数量。两者并排显示是有意为之：如果不一致，说明应答被截断了，那是传输问题而不是天空的问题。"
 
@@ -811,7 +813,7 @@ msgstr "最近的 +CMS ERROR"
 msgid "Last NMEA block"
 msgstr "最近的 NMEA 块"
 
-#: view/fm160/cells.js view/fm160/signal.js
+#: view/fm160/cells.js view/fm160/overview.js view/fm160/signal.js
 msgid "Last capture:"
 msgstr "最近抓取："
 
@@ -1060,6 +1062,10 @@ msgstr "本次抓取未上报邻区。"
 msgid "No profile may be chosen right now."
 msgstr "当前没有可选的配置。"
 
+#: view/fm160/overview.js
+msgid "No radio capture yet - press Refresh to take one."
+msgstr "尚无无线抓取——按\"刷新\"抓取一轮。"
+
 #: view/fm160/cells.js
 msgid "No scan result yet."
 msgstr "No scan result yet."
@@ -1278,7 +1284,7 @@ msgstr "读取中…"
 msgid "Received"
 msgstr "已接收"
 
-#: view/fm160/logs.js
+#: view/fm160/logs.js view/fm160/overview.js
 msgid "Refresh"
 msgstr "刷新"
 
@@ -2127,9 +2133,9 @@ msgstr "最近"
 msgid "in view, no fix yet"
 msgstr "可见但尚未定位"
 
-#: view/fm160/cells.js view/fm160/signal.js
+#: view/fm160/cells.js view/fm160/overview.js view/fm160/signal.js
 msgid "initiated"
-msgstr "initiated"
+msgstr "已发起"
 
 #: view/fm160/usb.js
 msgid "interface exists so that netifd can own the address side of it. QMI and MBIM profiles are dialled by the kernel (uqmi / umbim) instead."
@@ -2158,6 +2164,10 @@ msgstr "暂停管理"
 #: fm160/api.js
 msgid "management resume"
 msgstr "恢复管理"
+
+#: view/fm160/overview.js
+msgid "manual radio cross-check refresh"
+msgstr "无线交叉验证手动刷新"
 
 #: view/fm160/cells.js
 msgid "manual trigger from the cells page"
@@ -2272,6 +2282,10 @@ msgstr "一次空应答"
 #: fm160/api.js
 msgid "other"
 msgstr "其他"
+
+#: view/fm160/overview.js
+msgid "overview refresh"
+msgstr "概览刷新"
 
 #: view/fm160/signal.js
 msgid "page."

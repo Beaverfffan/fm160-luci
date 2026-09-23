@@ -36,7 +36,16 @@ var BADGE = {
 
 return view.extend({
 	load: function() {
-		return api.status();
+		this.radio = null;
+		this.radioAt = 0;
+		this.radioBusy = false;
+		return api.status().then(function(s) {
+			return api.radio().then(function(r) {
+				this.radio = r;
+				this.radioAt = Date.now();
+				return s;
+			}.bind(this));
+		}.bind(this));
 	},
 
 	render: function(state) {
@@ -44,6 +53,7 @@ return view.extend({
 
 		this.banner = E('div', {});
 		this.body   = E('div', {});
+		this.radioBox = E('div', {});
 		this.footer = E('div', {});
 
 		var actions = E('div', { 'class': 'cbi-section' }, [
@@ -94,7 +104,7 @@ return view.extend({
 			])
 		]);
 
-		this.container = E('div', {}, [ this.banner, this.body, actions, this.footer ]);
+		this.container = E('div', {}, [ this.banner, this.body, this.radioBox, actions, this.footer ]);
 		this.paint(state);
 
 		poll.add(function() {
@@ -104,19 +114,40 @@ return view.extend({
 				poll.stop();
 				return Promise.resolve();
 			}
-			return api.profile(true)
-				.then(api.status)
-				.then(function(s) {
-					self.state = s;
-					return api.radio();
-				})
-				.then(function(r) {
-					self.radio = r;
-					self.paint(self.state);
+			var chain = api.profile(true).then(api.status);
+			/* The radio cross-check costs 5 AT commands per round, so it
+			 * refreshes on a 30 s cadence; the daemon snapshot underneath
+			 * keeps its 2 s rhythm. */
+			if (Date.now() - self.radioAt > 30000)
+				chain = chain.then(function(s) {
+					return self.captureRadio().then(function() { return s; });
 				});
+			return chain.then(function(s) {
+				self.state = s;
+				self.paint(s);
+			});
 		}, 2);
 
 		return this.container;
+	},
+
+	/* One radio capture.  The manual button and the 30 s auto-cadence call
+	 * the same function; a failed capture keeps the last good data and the
+	 * stamp below it says how old that data is. */
+	captureRadio: function() {
+		var self = this;
+
+		if (self.radioBusy)
+			return Promise.resolve();
+		self.radioBusy = true;
+
+		return api.radio().then(function(r) {
+			self.radio = r;
+			self.radioAt = Date.now();
+		}).catch(function() {
+		}).then(function() {
+			self.radioBusy = false;
+		});
 	},
 
 	paint: function(state) {
@@ -205,11 +236,48 @@ return view.extend({
 
 		this.body.appendChild(section(_('Traffic'), kv(traffic)));
 
-		/* Radio cross-check: operator act, serving band + CA, rates, MCS/QCI.
-		 * All values come straight from the module via the AT manual's
-		 * §5.8/5.15/5.17/5.20/8.22 queries; "-" means the module gave us
-		 * nothing to parse, which on this firmware includes the optional
-		 * QCI fields. */
+		this.paintRadio();
+
+		this.footer.innerHTML = '';
+		if (state.port_found && state.at_state === 0)
+			this.footer.appendChild(E('div', { 'class': 'cbi-section' }, [
+				E('p', { 'class': 'hint' },
+				  _('Polling is tiered: registration every 5 s while a page is open, cells every 10 s, and byte counters are read from sysfs so they cost no AT commands at all.'))
+			]));
+	},
+
+	/* Radio cross-check: operator act, serving band + CA, rates, MCS/QCI.
+	 * All values come straight from the module via the AT manual's
+	 * queries; "-" means the module gave us nothing to parse, which on
+	 * this firmware includes the optional QCI fields. */
+	paintRadio: function() {
+		this.radioBox.innerHTML = '';
+
+		var head = [
+			E('button', {
+				'class': 'btn cbi-button',
+				'click': ui.createHandlerFn(this, function() {
+					api.opLog(_('overview refresh'), _('manual radio cross-check refresh'), _('initiated'));
+					return this.captureRadio().then(this.paintRadio.bind(this));
+				})
+			}, _('Refresh')),
+			' '
+		];
+
+		if (this.radioAt) {
+			head.push(E('span', { 'class': 'hint' },
+				_('Last capture:') + ' ' + new Date(this.radioAt).toLocaleString()));
+		}
+
+		if (!this.radio) {
+			head.push(E('p', { 'class': 'hint' },
+				_('No radio capture yet - press Refresh to take one.')));
+			this.radioBox.appendChild(section(_('Radio (AT cross-check)'),
+				E('div', {}, head)));
+			return;
+		}
+
+		var state = this.state || {};
 		var r = this.radio || {};
 		var ca = r.cainfo || {};
 		var st = r.statis || {};
@@ -220,14 +288,21 @@ return view.extend({
 			[ _('Operator (AT+COPS)'),
 				(cops.operator || state.operator || '-') +
 				(cops.act !== null && cops.act !== undefined ?
-					' (' + (api.copsActName(cops.act) || cops.act) + ')' : '') ]
+					' (' + (api.copsActName(cops.act) || cops.act) + ')' : '') ],
+			[ _('PCC band'), pcc ? '%s, %s MHz, PCI %d'.format(
+					pcc.band, pcc.bw !== null ? pcc.bw : '?', pcc.pci) : '-' ],
+			[ _('MIMO / modulation'), pcc ?
+				_('DL %sx %s / UL %sx %s').format(pcc.dlMimo, pcc.dlMod, pcc.ulMimo, pcc.ulMod) : '-' ],
+			[ _('Carrier aggregation'),
+				ca.scc && ca.scc.length ? (ca.scc.length + ' SCC') :
+				(pcc ? _('none (PCC only)') : '-') ],
+			[ _('Module rate (AT+GTSTATIS)'),
+				st.rxRate !== undefined && st.rxRate !== null ?
+					_('down %s/s / up %s/s').format(api.fmtBytes(st.rxRate), api.fmtBytes(st.txRate)) : '-' ],
+			[ _('Session total'),
+				st.rxBytes !== undefined && st.rxBytes !== null ?
+					api.fmtBytes(st.rxBytes) + ' / ' + api.fmtBytes(st.txBytes) : '-' ]
 		];
-		if (pcc) {
-			rows.push([ _('PCC band'), '%s, %s MHz, PCI %d'.format(
-				pcc.band, pcc.bw !== null ? pcc.bw : '?', pcc.pci) ]);
-			rows.push([ _('MIMO / modulation'),
-				_('DL %sx %s / UL %sx %s').format(pcc.dlMimo, pcc.dlMod, pcc.ulMimo, pcc.ulMod) ]);
-		}
 		if (ca.scc && ca.scc.length) {
 			ca.scc.forEach(function(sc) {
 				rows.push([ _(sc.id + ' (CA)'),
@@ -235,32 +310,17 @@ return view.extend({
 						sc.band, sc.dlBw !== null ? sc.dlBw : '?', sc.pci,
 						sc.state === 'active' ? _('active', 'fm160 ca state') : _('configured')) ]);
 			});
-		} else if (pcc) {
-			rows.push([ _('Carrier aggregation'), _('none (PCC only)') ]);
-		}
-		if (st) {
-			rows.push([ _('Module rate (AT+GTSTATIS)'),
-				_('down %s/s / up %s/s').format(api.fmtBytes(st.rxRate || 0), api.fmtBytes(st.txRate || 0)) ]);
-			rows.push([ _('Session total'), api.fmtBytes(st.rxBytes || 0) + ' / ' + api.fmtBytes(st.txBytes || 0) ]);
 		}
 		var lci = ci.lte || ci.nr;
-		if (lci) {
-			rows.push([ _('CQI / RANK / MCS'),
-				_('CQI %d, %s, DL MCS %d / UL MCS %d').format(lci.cqi, lci.rank, lci.dlmcs, lci.ulmcs) ]);
-			var qci = lci.txQci !== null || lci.rxQci !== null;
-			rows.push([ _('QCI'), qci ?
+		rows.push([ _('CQI / RANK / MCS'), lci ?
+			_('CQI %d, %s, DL MCS %d / UL MCS %d').format(lci.cqi, lci.rank, lci.dlmcs, lci.ulmcs) : '-' ]);
+		rows.push([ _('QCI'), lci ?
+			(lci.txQci !== null || lci.rxQci !== null ?
 				_('TX %s / RX %s').format(lci.txQci || '-', lci.rxQci || '-') :
-				_('not reported by this firmware') ]);
-		}
-		if (rows.length > 1)
-			this.body.appendChild(section(_('Radio (AT cross-check)'), kv(rows)));
+				_('not reported by this firmware')) : '-' ]);
 
-		this.footer.innerHTML = '';
-		if (state.port_found && state.at_state === 0)
-			this.footer.appendChild(E('div', { 'class': 'cbi-section' }, [
-				E('p', { 'class': 'hint' },
-				  _('Polling is tiered: registration every 5 s while a page is open, cells every 10 s, and byte counters are read from sysfs so they cost no AT commands at all.'))
-			]));
+		this.radioBox.appendChild(section(_('Radio (AT cross-check)'),
+			E('div', {}, [ E('div', {}, head), kv(rows) ])));
 	},
 
 	refresh: function() {
